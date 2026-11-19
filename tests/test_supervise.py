@@ -258,7 +258,7 @@ class MemorySync(unittest.TestCase):
 
         def commit(self, names, when):
             self.commits.append(list(names))
-            return True
+            return list(names), []
 
         def push(self):
             self.pushes += 1

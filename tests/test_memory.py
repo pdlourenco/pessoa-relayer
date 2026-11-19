@@ -5,6 +5,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -12,7 +13,9 @@ import unittest
 from pathlib import Path
 
 from relayer.config import ConfigError
-from relayer.memory import MAGIC, MemoryError_, MemoryRepo, dump, load
+from relayer.memory import MAGIC, MemoryError_, MemoryRepo, dump, load, receive
+
+END = struct.pack(">HQ", 0, 0)
 from relayer.runtime import load_runtime
 from relayer.users import Accounts, UidMap
 
@@ -65,7 +68,7 @@ class Stream(unittest.TestCase):
         (src / "small").write_bytes(b"y")
         skipped = self.roundtrip(src, dest, max_file=1000)
         self.assertEqual([p.name for p in dest.iterdir()], ["small"])
-        self.assertIn("big: too large", skipped[0])
+        self.assertIn("big: over the memory limits", skipped[0])
 
     def test_git_dir_is_not_copied(self):
         src, dest = self.tmp / "src", self.tmp / "dest"
@@ -75,11 +78,13 @@ class Stream(unittest.TestCase):
         self.assertFalse((dest / ".git").exists())
 
     def test_unsafe_paths_are_rejected(self):
-        for bad in ("../escape", "/etc/passwd", "a/../../b", ".git/hooks/post-commit", ""):
+        for bad in ("../escape", "/etc/passwd", "a/../../b", ".git/hooks/post-commit", "",
+                    "sub/.git/config", "a/.GIT/x", ".git./x", "GIT~1/x", "a/.gitattributes",
+                    "b/.gitmodules", ".git /x", "a//b", "a\\b"):
             with self.subTest(bad=bad):
                 dest = self.tmp / f"dest{abs(hash(bad))}"
                 with self.assertRaises(MemoryError_):
-                    load(io.BytesIO(MAGIC + record(bad, b"x")), dest)
+                    load(io.BytesIO(MAGIC + record(bad, b"x") + END), dest)
                 self.assertFalse((self.tmp / "escape").exists())
                 self.assertFalse(dest.exists())
 
@@ -90,6 +95,40 @@ class Stream(unittest.TestCase):
         with self.assertRaises(MemoryError_):
             load(io.BytesIO(MAGIC + record("ok.md", b"1") + b"\x00\x05"), dest)
         self.assertEqual((dest / "keep.md").read_text(), "keep")
+
+    def test_no_end_marker_no_change(self):
+        dest = self.tmp / "dest"
+        dest.mkdir()
+        (dest / "keep.md").write_text("keep")
+        with self.assertRaises(MemoryError_):
+            load(io.BytesIO(MAGIC + record("new.md", b"1")), dest)   # cut short, cleanly
+        self.assertEqual([p.name for p in dest.iterdir()], ["keep.md"])
+        with self.assertRaises(MemoryError_):
+            load(io.BytesIO(MAGIC + record("new.md", b"1") + END + b"x"), dest)
+
+    def test_git_like_names_are_skipped_not_fatal(self):
+        src, dest = self.tmp / "src", self.tmp / "dest"
+        (src / "a" / ".Git").mkdir(parents=True)
+        (src / "a" / ".Git" / "config").write_text("[core]")
+        (src / ".gitattributes").write_text("* filter=x")
+        (src / "notes.md").write_text("kept")
+        skipped = self.roundtrip(src, dest)
+        self.assertEqual(sorted(p.name for p in dest.rglob("*")), ["notes.md"])
+        self.assertEqual(len(skipped), 2)
+
+    def test_file_count_limit(self):
+        src, dest = self.tmp / "src", self.tmp / "dest"
+        src.mkdir()
+        for i in range(5):
+            (src / f"f{i}").write_text("")
+        buf = io.BytesIO()
+        skipped = dump(src, buf, max_files=3)
+        buf.seek(0)
+        self.assertEqual(receive(buf, dest), 3)
+        self.assertEqual(len(skipped), 2)
+        with self.assertRaises(MemoryError_):
+            receive(io.BytesIO(MAGIC + record("a", b"") + record("b", b"") + END),
+                    self.tmp / "d2", max_files=1)
 
     def test_helper_gets_none_of_the_supervisors_secrets(self):
         from unittest import mock
@@ -172,12 +211,23 @@ class Git(unittest.TestCase):
         git(self.other, "push", "-q", "origin", "HEAD:main")
 
     def test_nothing_to_commit(self):
-        self.assertFalse(self.repo.commit(["pa"], "now"))
+        self.assertEqual(self.repo.commit(["pa"], "now"), ([], []))
 
     def test_commit_and_push(self):
         self.write("pa", "one")
-        self.assertTrue(self.repo.commit(["pa"], "now"))
+        self.assertEqual(self.repo.commit(["pa"], "now"), (["pa"], []))
         self.assertIsNone(self.repo.push())
+
+    def test_a_git_link_in_one_folder_does_not_block_the_others(self):
+        self.write("pa", "pa's notes")
+        nested = self.clone / "memory" / "pb" / "inner"
+        nested.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(nested)], check=True)
+        git(nested, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+            "--allow-empty", "-m", "x")
+        committed, problems = self.repo.commit(["pa", "pb"], "now")
+        self.assertEqual(committed, ["pa"])
+        self.assertIn("git link", problems[0])
 
     def test_rejected_push_rebases_and_retries(self):
         self.other_commits("op", "from the ops class")   # a different heteronym
@@ -201,6 +251,86 @@ class Git(unittest.TestCase):
         status = subprocess.run(["git", "-C", str(self.clone), "status", "--porcelain"],
                                 capture_output=True, text=True).stdout
         self.assertEqual(status, "")                     # rebase aborted cleanly
+
+
+class FakeIdent:
+    """Runs the helper as the current user: no root needed."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def as_user(self):
+        return []
+
+
+class Helper(unittest.TestCase):
+    """collect/restore against a stand-in helper, to drive failures."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        (self.tmp / "repo" / "memory" / "pa").mkdir(parents=True)
+        (self.tmp / "repo" / "memory" / "pa" / "saved.md").write_text("saved")
+        (self.tmp / "live" / "pa").mkdir(parents=True)
+        self.repo = MemoryRepo(self.tmp / "repo", self.tmp / "live", timeout=3)
+
+    def with_helper(self, script):
+        p = self.tmp / "helper.py"
+        p.write_text(textwrap.dedent(script))
+        self.repo._helper = lambda ident, verb, folder: [sys.executable, str(p), verb, folder]
+
+    def saved(self):
+        return sorted(x.name for x in (self.tmp / "repo" / "memory" / "pa").iterdir())
+
+    def test_failed_dump_keeps_the_saved_copy(self):
+        self.with_helper(f"""
+            import sys, struct
+            out = sys.stdout.buffer
+            out.write({MAGIC!r})
+            name = b"partial.md"
+            out.write(struct.pack(">HQ", len(name), 1) + name + b"x")
+            out.write(struct.pack(">HQ", 0, 0))
+            out.flush()
+            sys.exit(1)
+            """)
+        with self.assertRaises(MemoryError_):
+            self.repo.collect(FakeIdent("pa"))
+        self.assertEqual(self.saved(), ["saved.md"])
+
+    def test_a_hung_helper_is_killed(self):
+        self.with_helper("""
+            import sys, time
+            sys.stdout.buffer.write(b"RLMEM2\\n"); sys.stdout.flush()
+            time.sleep(60)
+            """)
+        start = time.time()
+        with self.assertRaises(MemoryError_):
+            self.repo.collect(FakeIdent("pa"))
+        self.assertLess(time.time() - start, 20)
+        self.assertEqual(self.saved(), ["saved.md"])
+
+    def test_stderr_flood_does_not_wedge(self):
+        self.with_helper(f"""
+            import sys
+            sys.stderr.write("x" * 2_000_000)
+            sys.stdout.buffer.write({MAGIC!r} + b"\\x00" * 10)
+            """)
+        self.repo.collect(FakeIdent("pa"))
+        self.assertEqual(self.saved(), [])
+
+    def test_symlinked_folders_in_the_clone_are_refused(self):
+        secret = self.tmp / "secret"
+        secret.mkdir()
+        (secret / "credentials").write_text("TOKEN")
+        mem = self.tmp / "repo" / "memory"
+        shutil.rmtree(mem / "pa")
+        (mem / "pa").symlink_to(secret)
+        self.assertFalse(self.repo.restore(FakeIdent("pa")))
+        shutil.rmtree(mem)
+        mem.symlink_to(secret)
+        with self.assertRaises(MemoryError_):
+            self.repo.collect(FakeIdent("pa"))
+        self.assertTrue((secret / "credentials").exists())
 
 
 ROOT = os.geteuid() == 0 and shutil.which("setpriv") and shutil.which("useradd")

@@ -427,17 +427,34 @@ live folder:
 - its live folder is copied into `<repo>/memory/<name>/`. The supervisor
   cannot read the live folder, so the copy is a pipe: a helper running as
   the heteronym writes a stream of (path, bytes) records for the regular
-  files it can see, and the supervisor writes them into the clone. Symlinks
-  are never followed, `.git` is never copied, a path with `..`, an absolute
-  part or a `.git` component ends the copy with nothing changed, files over
-  5 MB are skipped and logged, and one heteronym's memory is capped at
-  50 MB;
-- the clone is committed (`memory: <names> (<time>)`) and pushed.
+  files it can see, then an end marker; the supervisor writes them into a
+  staging directory. The stream is treated as hostile, since the
+  heteronym's own session can tamper with a same-uid helper:
+  - a path that is absolute, contains `..`, is not normalised, or has a
+    git-like component anywhere (`.git` and every `.git*` name, any case,
+    with trailing dots or spaces, or `git~N`) ends the copy;
+  - symlinks are never followed and git-like names are skipped by the
+    helper, so a heteronym's own odd files never block its memory;
+  - limits: 5 MB a file (skipped and logged), 50 MB and 10 000 files a
+    heteronym, names counted;
+  - the staging directory replaces the saved copy only after the end
+    marker arrived and the helper exited cleanly; otherwise the saved copy
+    is unchanged;
+  - the helper runs under a watchdog (120 s) with its stderr going to a
+    file, so a stopped, hung or chatty helper cannot wedge the supervisor;
+    it starts in `/` with `python -P`, so no module in its working
+    directory can replace ours;
+  - neither `<repo>/memory` nor `<repo>/memory/<name>` may be a symlink.
+- each heteronym's folder is staged on its own (`git add`), and one that
+  git refuses, or that holds a git link, is reported and left out without
+  stopping the others; then the clone is committed
+  (`memory: <names> (<time>)`) and pushed. Git always runs with
+  `core.fsmonitor=false`, `core.hooksPath=/dev/null` and
+  `submodule.recurse=false`.
 
 The helper gets only `PATH`, `PYTHONPATH` and `LANG`: it runs as the
 heteronym, whose session could read a same-uid process's environment, so
-nothing of the supervisor's (git credentials, for one) reaches it. One
-heteronym's failed copy is logged and does not stop the others.
+nothing of the supervisor's (git credentials, for one) reaches it.
 
 ### 7.3 When a push fails
 
@@ -451,8 +468,10 @@ while the clone's volume survives.
 ### 7.4 Restoring
 
 When a heteronym's live folder is empty (a new volume), it is filled from
-`<repo>/memory/<name>/` by the same pipe the other way round, written as
-the heteronym. A live folder with anything in it is never overwritten.
+`<repo>/memory/<name>/` by the same pipe the other way round, received and
+written as the heteronym, with the same checks. A live folder with anything
+in it is never overwritten, and a saved folder that is a symlink is never
+read.
 
 Verified by: `tests/test_memory.py` (stream safety, git behaviour against a
 local origin including a rejected push and a conflict, and collect and

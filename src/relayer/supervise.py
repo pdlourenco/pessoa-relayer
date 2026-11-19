@@ -201,9 +201,12 @@ class Supervisor:
             except Exception as exc:  # noqa: BLE001 - one heteronym must not stop the rest
                 log.append(f"memory {ident.name}: {exc}")
         try:
-            if names and memory.commit(names, time.strftime("%Y-%m-%dT%H:%M:%S%z",
-                                                            time.localtime(now))):
-                log.append(f"memory: committed {', '.join(names)}")
+            committed, problems = memory.commit(
+                names, time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now))) \
+                if names else ([], [])
+            log += problems
+            if committed:
+                log.append(f"memory: committed {', '.join(committed)}")
             if memory.push_state.blocked or names:
                 problem = memory.push()
                 if problem:
