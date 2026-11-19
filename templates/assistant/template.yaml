@@ -1,6 +1,7 @@
 # A general assistant: notes, research, drafting. No repository write access,
 # no forge token, so it is safe to create from chat (docs/SPEC.md §2).
 version: 1
+classes: [assistants]
 description: General assistant with its own notes folder and no repository access.
 max_tier: strong
 default_tier: standard
