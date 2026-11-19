@@ -10,10 +10,12 @@ version="${1:?usage: $0 <claude-code-version>}"
 tag="pessoa-relayer:smoke"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-echo "== the version pin is required: a build without it must fail"
-if docker build -q -t pessoa-relayer:nopin . >/dev/null 2>&1; then
+echo "== the version pin is required: a build without it must fail, for that reason"
+if out=$(docker build -t pessoa-relayer:nopin . 2>&1); then
   fail "image built without CLAUDE_CODE_VERSION"
 fi
+grep -q "CLAUDE_CODE_VERSION is required" <<<"$out" \
+  || { echo "$out" | tail -20 >&2; fail "no-pin build failed for another reason"; }
 
 echo "== build with the pin"
 docker build -t "$tag" --build-arg CLAUDE_CODE_VERSION="$version" .
@@ -21,7 +23,13 @@ docker build -t "$tag" --build-arg CLAUDE_CODE_VERSION="$version" .
 run() { docker run --rm "$@"; }
 
 echo "== runs as a non-root user"
-[ "$(run --entrypoint id "$tag" -u)" != "0" ] || fail "container runs as root"
+uid=$(run --entrypoint id "$tag" -u)
+[ -n "$uid" ] && [ "$uid" != 0 ] || fail "container runs as root (uid '$uid')"
+
+echo "== sessions get a locale, user and shell"
+# shellcheck disable=SC2016  # expanded inside the container, on purpose
+run --entrypoint sh "$tag" -c 'test "$LANG" = C.UTF-8 && test "$USER" = agent && test "$SHELL" = /bin/bash' \
+  || fail "LANG, USER or SHELL not set"
 
 echo "== claude is installed and on PATH"
 run --entrypoint claude "$tag" --version

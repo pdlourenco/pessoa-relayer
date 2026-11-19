@@ -51,14 +51,23 @@ Everything host-specific goes in `.env` and a config directory; the
 repository holds only examples.
 
 1. Copy `.env.example` to `.env`. Pin `CLAUDE_CODE_VERSION`, set the user
-   ids to the owner of your host directories, and fill in the four host
-   paths. Back up the Claude, work and state directories.
+   ids, and fill in the four host paths. Create the Claude, work and state
+   directories yourself and give them to that user (`chown AGENT_UID:AGENT_GID`):
+   if compose creates a missing one, it is owned by root and the container
+   cannot write it. Back up those three.
 2. Put `personas.yaml` and `relayer.yaml` in the config directory, starting
-   from `examples/`. Check them with `relayer validate`.
-3. Build, then sign in once, interactively, with your own subscription:
+   from `examples/`. Keep `CLAUDE_CONFIG_DIR`, `DISABLE_AUTOUPDATER` and
+   `DISABLE_UPDATES` in `relayer.yaml`'s `pass_env`: sessions inherit nothing
+   else, and without `CLAUDE_CONFIG_DIR` they would not find the sign-in.
+3. Build, check the config inside the image, then sign in once,
+   interactively, with your own subscription:
 
    ```bash
    docker compose -f compose.example.yaml build
+   ```
+
+   ```bash
+   docker compose -f compose.example.yaml run --rm relayer relayer validate
    ```
 
    ```bash

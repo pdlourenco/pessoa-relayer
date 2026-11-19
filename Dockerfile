@@ -19,10 +19,12 @@ RUN apt-get update \
       ca-certificates curl git tmux tini python3 python3-venv \
  && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd --gid "$AGENT_GID" agent \
- && useradd --uid "$AGENT_UID" --gid "$AGENT_GID" --create-home --shell /bin/bash agent \
- && mkdir -p /work /state /config \
- && chown agent:agent /work /state
+# The GID may already exist in Debian (e.g. 20, macOS's staff, is dialout
+# here); reuse it rather than fail. -l keeps a large UID from bloating lastlog.
+RUN (getent group "$AGENT_GID" >/dev/null || groupadd --gid "$AGENT_GID" agent) \
+ && useradd -l --uid "$AGENT_UID" --gid "$AGENT_GID" --create-home --shell /bin/bash agent \
+ && mkdir -p /work /state /config /home/agent/.claude \
+ && chown "$AGENT_UID:$AGENT_GID" /work /state /home/agent/.claude
 
 COPY pyproject.toml README.md /opt/relayer/src-pkg/
 COPY src /opt/relayer/src-pkg/src
@@ -34,13 +36,22 @@ RUN python3 -m venv /opt/relayer/venv \
 
 USER agent
 WORKDIR /home/agent
+# pipefail: under plain sh a failed curl feeds bash nothing, bash exits 0,
+# and the image would build without claude.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Native installer, pinned (code.claude.com/docs/en/setup, "Install a specific
 # version"). DISABLE_AUTOUPDATER stops the background update check;
 # DISABLE_UPDATES also blocks a session running "claude update", so the
 # version only moves when the image is rebuilt. CLAUDE_CONFIG_DIR keeps
 # settings, credentials and .claude.json in the one mounted volume.
-RUN curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION"
+RUN curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION" \
+ && /home/agent/.local/bin/claude --version
+# Sessions start with `env -i` and get HOME, PATH, LANG, USER and SHELL from
+# here (docs/SPEC.md §4.2); Docker sets only HOME and PATH by itself.
 ENV PATH=/home/agent/.local/bin:$PATH \
+    LANG=C.UTF-8 \
+    USER=agent \
+    SHELL=/bin/bash \
     DISABLE_AUTOUPDATER=1 \
     DISABLE_UPDATES=1 \
     CLAUDE_CONFIG_DIR=/home/agent/.claude \
