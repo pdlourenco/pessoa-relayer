@@ -239,3 +239,28 @@ Verified by: `tests/test_tmux.py` (`test_session_inherits_nothing`,
 `test_hash_in_workdir_is_literal`,
 `test_trailing_semicolon_argument_cannot_chain`), `tests/test_config.py`
 (`test_folder_characters_tmux_would_interpret`).
+
+## 5. Supervisor
+
+`relayer supervise [--interval 30] [--state DIR]` reconciles (§4) every
+interval, until SIGTERM or SIGINT. It refuses to start (exit 2) under §3.2,
+and exits 1 if the first configuration is invalid.
+
+- **Bad edits are survived.** If a later reload fails validation, the
+  errors are logged and the last valid configuration stays in force: a typo
+  in `personas.yaml` must not stop every session.
+- **Idle stop.** A running, enabled persona with an `idle_stop` is stopped
+  once that long has passed since its session's last activity (tmux
+  `session_activity`: output in the pane, a heuristic for "in use"). It is
+  then **parked**: a marker file `DIR/parked/<name>` keeps it stopped,
+  across supervisor restarts, until `relayer wake <name>` removes the
+  marker. Parks of personas that are removed or disabled are cleared.
+- **Crash back-off.** A session gone within 60 s of being started counts as
+  a crash. Its next start waits `interval × 2^crashes`, at most 900 s, and
+  each held start is logged. A session that stays up 300 s clears its count.
+  An idle stop or a deliberate stop is never a crash.
+- **Exit leaves sessions running,** so restarting the supervisor does not
+  restart every persona.
+- Log lines go to stdout, one per action, with a timestamp.
+
+Verified by: `tests/test_supervise.py`.

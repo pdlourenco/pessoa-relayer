@@ -11,6 +11,13 @@ from .config import ConfigError, load_personas, load_templates
 from .reconcile import apply, plan
 from .runtime import Runtime, check_environment, load_runtime
 from .sessions import SessionError, TmuxBackend
+from .supervise import ParkStore, Supervisor, run
+
+
+def _state_dir(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--state", type=Path, default=Path(os.environ.get("RELAYER_STATE", "state")),
+        help="supervisor state directory (env RELAYER_STATE; default ./state)")
 
 
 def _common(parser: argparse.ArgumentParser, runtime_required: bool) -> None:
@@ -89,6 +96,33 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def cmd_supervise(args: argparse.Namespace) -> int:
+    problems = check_environment(dict(os.environ))
+    if problems:
+        _errors(problems)
+        return 2
+    try:
+        runtime, _, _ = _load(args)
+    except ConfigError as exc:
+        # The first config must be valid; later bad edits are survived.
+        _errors(exc.errors)
+        return 1
+    supervisor = Supervisor(TmuxBackend(runtime.tmux_socket), lambda: _load(args)[::2],
+                            ParkStore(args.state / "parked"), args.interval,
+                            dict(os.environ))
+    return run(supervisor, args.interval)
+
+
+def cmd_wake(args: argparse.Namespace) -> int:
+    try:
+        woke = ParkStore(args.state / "parked").wake(args.name)
+    except ValueError as exc:
+        _errors([str(exc)])
+        return 1
+    print(f"{args.name}: {'woken; starts on the next tick' if woke else 'was not parked'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="relayer")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -103,6 +137,19 @@ def main(argv: list[str] | None = None) -> int:
     reconcile.add_argument("--dry-run", action="store_true",
                            help="print the actions without carrying them out")
     reconcile.set_defaults(func=cmd_reconcile)
+
+    supervise = sub.add_parser(
+        "supervise", help="reconcile forever; stop idle sessions; back off crash loops")
+    _common(supervise, runtime_required=True)
+    _state_dir(supervise)
+    supervise.add_argument("--interval", type=float, default=30.0,
+                           help="seconds between passes (default 30)")
+    supervise.set_defaults(func=cmd_supervise)
+
+    wake = sub.add_parser("wake", help="let an idle-stopped persona start again")
+    _state_dir(wake)
+    wake.add_argument("name")
+    wake.set_defaults(func=cmd_wake)
 
     args = parser.parse_args(argv)
     return args.func(args)
