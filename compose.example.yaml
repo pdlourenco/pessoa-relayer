@@ -13,9 +13,9 @@ services:
     restart: unless-stopped
     volumes:
       - ${RELAYER_CLAUDE_DIR:?host path for Claude Code config and sign-in}:/home/agent/.claude
-      - ${RELAYER_WORK_DIR:?host path for persona workspaces}:/work
+      - ${RELAYER_WORK_DIR:?host path for heteronym workspaces}:/work
       - ${RELAYER_STATE_DIR:?host path for supervisor state}:/state
-      - ${RELAYER_CONFIG_DIR:?host path holding personas.yaml and relayer.yaml}:/config:ro
+      - ${RELAYER_CONFIG_DIR:?host path holding heteronyms.yaml and relayer.yaml}:/config:ro
     mem_limit: ${RELAYER_MEM_LIMIT:-4g}
     # No Docker socket, no privileged mode, no extra capabilities.
     cap_drop: [ALL]

@@ -11,7 +11,7 @@ from relayer.sessions import Running
 from relayer.supervise import (MAX_BACKOFF, MIN_UPTIME, ParkStore, Supervisor,
                                check_state_dir, run)
 
-from helpers import persona
+from helpers import heteronym
 
 RT = Runtime(models={"fast": "f", "standard": "s", "strong": "o", "frontier": "x"},
              command=("agent",))
@@ -48,7 +48,7 @@ class Tick(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.personas = {"pa": persona(folder=str(self.root / "pa"))}
+        self.heteronyms = {"pa": heteronym(folder=str(self.root / "pa"))}
         self.backend = Backend()
         self.parks = ParkStore(self.root / "parked")
         self.fail_load = False
@@ -56,8 +56,8 @@ class Tick(unittest.TestCase):
 
     def load(self):
         if self.fail_load:
-            raise ConfigError(["personas.yaml: broken"])
-        return RT, dict(self.personas)
+            raise ConfigError(["heteronyms.yaml: broken"])
+        return RT, dict(self.heteronyms)
 
     def tick(self, t):
         self.backend.now = T0 + t
@@ -82,7 +82,7 @@ class Tick(unittest.TestCase):
         self.assertEqual(self.backend.log, [])
 
     def test_idle_stop_parks_until_woken(self):
-        self.personas["pa"] = dataclasses.replace(self.personas["pa"], idle_stop=600)
+        self.heteronyms["pa"] = dataclasses.replace(self.heteronyms["pa"], idle_stop=600)
         self.tick(0)
         self.backend.touch("pa", 100)
         self.assertEqual(self.tick(650), [])            # 550s idle: under the limit
@@ -94,15 +94,15 @@ class Tick(unittest.TestCase):
         self.assertIn("start pa: not running", self.tick(760))
 
     def test_idle_stop_is_not_a_crash(self):
-        self.personas["pa"] = dataclasses.replace(self.personas["pa"], idle_stop=60)
+        self.heteronyms["pa"] = dataclasses.replace(self.heteronyms["pa"], idle_stop=60)
         self.tick(0)
         self.tick(60)                                   # idle-stopped at 60s
         self.parks.wake("pa")
         self.assertIn("start pa: not running", self.tick(61))
 
-    def test_park_cleared_when_persona_removed(self):
+    def test_park_cleared_when_heteronym_removed(self):
         self.parks.park("pa")
-        self.personas = {}
+        self.heteronyms = {}
         self.tick(0)
         self.assertEqual(self.parks.names(), set())
 
@@ -144,23 +144,23 @@ class Tick(unittest.TestCase):
 
     def test_stop_soon_after_start_is_not_a_crash(self):
         self.tick(0)
-        self.personas["pa"] = dataclasses.replace(self.personas["pa"], enabled=False)
+        self.heteronyms["pa"] = dataclasses.replace(self.heteronyms["pa"], enabled=False)
         self.assertIn("stop pa: disabled", self.tick(10))
-        self.personas["pa"] = dataclasses.replace(self.personas["pa"], enabled=True)
+        self.heteronyms["pa"] = dataclasses.replace(self.heteronyms["pa"], enabled=True)
         log = self.tick(20)
         self.assertIn("start pa: not running", log)
         self.assertFalse(any(l.startswith(("crash", "hold")) for l in log))
 
-    def test_park_cleared_when_persona_disabled(self):
+    def test_park_cleared_when_heteronym_disabled(self):
         self.parks.park("pa")
-        self.personas["pa"] = dataclasses.replace(self.personas["pa"], enabled=False)
+        self.heteronyms["pa"] = dataclasses.replace(self.heteronyms["pa"], enabled=False)
         self.tick(0)
         self.assertEqual(self.parks.names(), set())
 
-    def test_disabled_persona_is_stopped_not_parked(self):
-        self.personas["pa"] = dataclasses.replace(self.personas["pa"], idle_stop=60)
+    def test_disabled_heteronym_is_stopped_not_parked(self):
+        self.heteronyms["pa"] = dataclasses.replace(self.heteronyms["pa"], idle_stop=60)
         self.tick(0)
-        self.personas["pa"] = dataclasses.replace(self.personas["pa"], enabled=False)
+        self.heteronyms["pa"] = dataclasses.replace(self.heteronyms["pa"], enabled=False)
         self.assertIn("stop pa: disabled", self.tick(120))
         self.assertEqual(self.parks.names(), set())
 
@@ -172,7 +172,7 @@ class Tick(unittest.TestCase):
 
     def test_restart_that_dies_counts_as_crash(self):
         self.tick(0)
-        self.personas["pa"] = dataclasses.replace(self.personas["pa"], tier="strong")
+        self.heteronyms["pa"] = dataclasses.replace(self.heteronyms["pa"], tier="strong")
         self.assertIn("restart pa: configuration changed", self.tick(400))
         self.backend.sessions.clear()
         self.assertTrue(any(l.startswith("crash pa") for l in self.tick(401)))
@@ -186,7 +186,7 @@ class Tick(unittest.TestCase):
         self.assertIn(f"crash pa: exited after 1s; next start in {MAX_BACKOFF}s", log)
 
     def test_park_failure_leaves_session_running(self):
-        self.personas["pa"] = dataclasses.replace(self.personas["pa"], idle_stop=60)
+        self.heteronyms["pa"] = dataclasses.replace(self.heteronyms["pa"], idle_stop=60)
         (self.root / "parked").write_text("a file, not a directory")
         self.tick(0)
         log = self.tick(120)

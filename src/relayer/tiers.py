@@ -1,7 +1,7 @@
 """Abstract model tiers.
 
 The four capability rungs from disciplined-project-seed's draft ADR-0020.
-Personas and templates name a tier, never a model; the runtime config maps
+Heteronyms and templates name a tier, never a model; the runtime config maps
 tiers to the models of whichever agent tool it launches.
 """
 

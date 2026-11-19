@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import ConfigError, Persona, _is_version, _load_yaml, _unknown_keys
+from .config import ConfigError, Heteronym, _is_version, _load_yaml, _unknown_keys
 from .tiers import TIERS
 
 RUNTIME_KEYS = {"version", "work_root", "models", "session", "tmux_socket"}
@@ -55,7 +55,7 @@ class Runtime:
                              "environment or in relayer.yaml session.env")
         return env
 
-    def session_command(self, persona: Persona, environ: dict[str, str]) -> str:
+    def session_command(self, heteronym: Heteronym, environ: dict[str, str]) -> str:
         """One shell-quoted string: ``env -i NAME=value … <argv>``.
 
         tmux hands a single string to ``sh -c``; shlex quoting means no
@@ -63,31 +63,31 @@ class Runtime:
         the bare ";" tmux treats as a command separator.
         """
         assignments = [f"{k}={v}" for k, v in sorted(self.session_env(environ).items())]
-        return shlex.join(["env", "-i", *assignments, *self.session_argv(persona)])
+        return shlex.join(["env", "-i", *assignments, *self.session_argv(heteronym)])
 
-    def session_hash(self, persona: Persona) -> str:
+    def session_hash(self, heteronym: Heteronym) -> str:
         """Hash of the configuration that shapes the session (SPEC §4).
 
-        It covers the persona hash, the model, the command template, the
+        It covers the heteronym hash, the model, the command template, the
         literal ``env`` and the *names* in ``pass_env``, never the values of
         inherited variables: a reconcile run from a shell whose PATH differs
         from the supervisor's must not restart every session.
         """
-        shape = {"persona": persona.config_hash(), "model": self.models[persona.tier],
+        shape = {"heteronym": heteronym.config_hash(), "model": self.models[heteronym.tier],
                  "command": list(self.command), "env": self.env,
                  "pass_env": list(self.pass_env), "base": list(BASE_ENV),
                  "term": DEFAULT_TERM}
         blob = json.dumps(shape, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
-    def session_argv(self, persona: Persona) -> list[str]:
-        """The command that runs ``persona``'s session, placeholders filled."""
+    def session_argv(self, heteronym: Heteronym) -> list[str]:
+        """The command that runs ``heteronym``'s session, placeholders filled."""
         settings = json.dumps(
-            {"permissions": {"allow": list(persona.allow),
-                             "deny": list(persona.deny)}},
+            {"permissions": {"allow": list(heteronym.allow),
+                             "deny": list(heteronym.deny)}},
             separators=(",", ":"))
-        values = {"model": self.models[persona.tier], "name": persona.name,
-                  "workdir": persona.folders[0], "settings": settings}
+        values = {"model": self.models[heteronym.tier], "name": heteronym.name,
+                  "workdir": heteronym.folders[0], "settings": settings}
         return [re.sub(r"\{(\w+)\}", lambda m: values[m.group(1)], arg)
                 for arg in self.command]
 

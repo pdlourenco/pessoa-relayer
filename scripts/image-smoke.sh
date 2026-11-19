@@ -40,13 +40,13 @@ run --entrypoint sh "$tag" -c 'test "$DISABLE_AUTOUPDATER" = 1 && test "$DISABLE
   || fail "auto-update not disabled"
 
 echo "== shipped examples validate inside the image"
-run --entrypoint relayer "$tag" validate --personas /opt/relayer/examples/personas.yaml \
+run --entrypoint relayer "$tag" validate --heteronyms /opt/relayer/examples/heteronyms.yaml \
   --runtime /opt/relayer/examples/relayer.yaml
 
 echo "== supervise refuses to start with an API key in the environment"
 set +e
 run -e ANTHROPIC_API_KEY=sk-smoke -v "$PWD/examples:/config:ro" \
-  -e RELAYER_PERSONAS=/config/personas.yaml -e RELAYER_RUNTIME=/config/relayer.yaml "$tag"
+  -e RELAYER_HETERONYMS=/config/heteronyms.yaml -e RELAYER_RUNTIME=/config/relayer.yaml "$tag"
 code=$?
 set -e
 [ "$code" = 2 ] || fail "expected exit 2 from the API-key guard, got $code"

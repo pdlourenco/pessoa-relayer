@@ -1,7 +1,7 @@
-# Example personas.yaml. Copy it next to your deployment and replace the chat
+# Example heteronyms.yaml. Copy it next to your deployment and replace the chat
 # identifiers; nothing here is specific to one host (docs/SPEC.md §1).
 version: 1
-personas:
+heteronyms:
   pa:
     template: assistant
     channel:

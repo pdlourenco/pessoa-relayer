@@ -7,7 +7,7 @@ default_tier: standard
 folders: ["{work}/{name}"]
 permissions:
   allow: [Read, Edit, Write, WebSearch, WebFetch]
-  # Edit(./.claude/**) stops a persona widening its own permissions through
+  # Edit(./.claude/**) stops a heteronym widening its own permissions through
   # its project settings (docs/SPEC.md §2.3). Deny wins at every level.
   deny: ["Edit(./.claude/**)", "Bash(rm *)"]
 channel_kinds: [signal, telegram]
