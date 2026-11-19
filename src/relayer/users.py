@@ -18,8 +18,11 @@ import json
 import os
 import pwd
 import re
+import select
+import signal
 import stat
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -28,6 +31,7 @@ USER_PREFIX = "h-"          # keeps heteronym users clear of system names
 DEFAULT_UID_BASE = 20000
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,29}$")   # + prefix stays within 32
 MAX_OWNER_SCAN = 100_000    # entries walked when rebuilding; beyond it, refuse
+AS_USER_TIMEOUT = 30.0      # seconds for a command run as a heteronym
 
 
 class AccountError(RuntimeError):
@@ -49,6 +53,10 @@ class Identity:
         """Command prefix that runs the rest as this user, with no capabilities."""
         return ["setpriv", f"--reuid={self.uid}", f"--regid={self.gid}",
                 "--clear-groups", "--"]
+
+    def kill(self, pids) -> None:
+        """SIGKILL ``pids`` of this user; see :func:`kill_as`."""
+        kill_as(self.uid, pids)
 
 
 class UidMap:
@@ -256,8 +264,8 @@ class Accounts:
     def _as_user_rest(self, ident: Identity, path: str) -> None:
         # Below the heteronym's own folder, act as the heteronym. chmod fails
         # unless it owns the final folder: that is the ownership check.
-        _run([*ident.as_user(), "mkdir", "-p", "-m", "700", "--", path])
-        _run([*ident.as_user(), "chmod", "700", "--", path])
+        run_as(ident, ["mkdir", "-p", "-m", "700", "--", path])
+        run_as(ident, ["chmod", "700", "--", path])
 
     def prepare(self, name: str, folders: tuple[str, ...]) -> Identity:
         ident = self.identity(name)
@@ -266,6 +274,74 @@ class Accounts:
         for folder in folders:
             self.ensure_dir(ident, folder)
         return ident
+
+
+def kill_as(uid: int, pids) -> None:
+    """Send SIGKILL to ``pids``, all processes of ``uid``, from a process the
+    heteronym cannot touch.
+
+    Root here holds no CAP_KILL. A `kill` command run as the heteronym would
+    have the right uid, but the heteronym could stop it (SIGSTOP) before it
+    signals, and the caller would wait forever. So a forked child sets only
+    its *effective* uid to ``uid``, keeping real and saved uid 0: the kernel
+    lets it signal processes whose real or saved uid is ``uid``, while the
+    heteronym, matching neither of the child's real or saved uid, can
+    neither signal it nor trace it. Not root: we already are the user.
+    """
+    pids = [int(p) for p in pids]
+    if not pids:
+        return
+    if os.geteuid() != 0:
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        return
+    child = os.fork()
+    if child == 0:                        # pragma: no cover - runs in the child
+        try:
+            os.setresuid(0, uid, 0)
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        finally:
+            os._exit(0)
+    os.waitpid(child, 0)
+
+
+def run_as(ident: Identity, argv: list[str], timeout: float = AS_USER_TIMEOUT) -> None:
+    """Run ``argv`` as the heteronym, bounded: a heteronym can stop or hold
+    any process of its uid. Waits for the process, not for end-of-file (it
+    can hold a copy of the pipe); on the deadline the process is killed with
+    :func:`kill_as`. Raises AccountError on failure or timeout."""
+    proc = subprocess.Popen([*ident.as_user(), *argv], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        try:
+            code = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            kill_as(ident.uid, [proc.pid])
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            raise AccountError(f"{argv[0]} as {ident.user}: no answer within "
+                               f"{timeout:g}s") from None
+        err = b""
+        if select.select([proc.stderr], [], [], 0)[0]:
+            os.set_blocking(proc.stderr.fileno(), False)
+            try:
+                err = os.read(proc.stderr.fileno(), 64 * 1024)
+            except BlockingIOError:
+                pass
+    finally:
+        proc.stderr.close()
+    if code != 0:
+        raise AccountError(f"{argv[0]} as {ident.user} failed: "
+                           f"{err.decode(errors='replace').strip()}")
 
 
 def processes_of(uid: int) -> list[int]:
