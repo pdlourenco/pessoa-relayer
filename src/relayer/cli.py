@@ -12,6 +12,7 @@ from .config import ConfigError, load_heteronyms, load_templates
 from .reconcile import apply, plan
 from .runtime import Runtime, check_environment, load_runtime
 from .sessions import SessionError, TmuxBackend, UserTmuxBackend
+from .memory import MemoryRepo
 from .users import Accounts, UidMap
 from .supervise import ParkStore, Supervisor, check_state_dir, run
 
@@ -86,7 +87,13 @@ def _backend(runtime: Runtime, state: Path):
         return None, "isolation: users needs setpriv (util-linux)"
     accounts = Accounts(UidMap(state / "users.json", runtime.uid_base), runtime.homes,
                         runtime.work_root)
-    return UserTmuxBackend(runtime.tmux_socket, accounts), None
+    memory = None
+    if runtime.memory_repo is not None:
+        if not (Path(runtime.memory_repo) / ".git").is_dir():
+            return None, (f"memory.repo {runtime.memory_repo} is not a git clone; clone "
+                          "the memory repository there first (docs/SPEC.md §7)")
+        memory = MemoryRepo(Path(runtime.memory_repo), Path(runtime.memory_live))
+    return UserTmuxBackend(runtime.tmux_socket, accounts, memory=memory), None
 
 
 def cmd_reconcile(args: argparse.Namespace) -> int:

@@ -25,7 +25,9 @@ jobs:
       - run: pip install -e .
       - run: python -m unittest discover -s tests -v
       - name: real-user isolation tests, as root (they skip without it)
-        run: sudo -E env "PATH=$PATH" python -m unittest discover -s tests -p test_users.py -v
+        run: |
+          sudo -E env "PATH=$PATH" python -m unittest discover -s tests -p test_users.py -v
+          sudo -E env "PATH=$PATH" python -m unittest discover -s tests -p test_memory.py -v
       - name: shipped examples validate
         run: relayer validate --heteronyms examples/heteronyms.yaml --templates templates
 

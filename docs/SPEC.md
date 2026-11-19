@@ -398,3 +398,64 @@ one case with only the three capabilities; CI runs it as root), and
 `scripts/image-smoke.sh` (the image under compose's exact capabilities: the
 session's process is `h-<name>` with no capabilities, its folders are 700,
 and root in the container cannot read them).
+
+## 7. Memory
+
+Each heteronym keeps plain-text memory it reads and updates. Memory is
+versioned in a private repository, written only by its own heteronym, and
+grants nothing: it is advice to a session, never a permission. Permissions
+come only from definitions (§1, §2).
+
+### 7.1 Shape
+
+```yaml
+memory:
+  repo: <absolute path>     # a root-owned git clone of the memory repository
+  live: <absolute path>     # default /memory; <live>/<name> per heteronym
+  interval: <duration>      # default 15m; not "never"
+```
+
+Memory needs `isolation: users` (§6). The heteronym's live folder,
+`<live>/<name>`, is prepared like its other folders (§6.2) and offered to
+its session through the `{memory}` placeholder.
+
+### 7.2 Collecting and committing
+
+Every `interval`, for each heteronym of the container's class that has a
+live folder:
+
+- its live folder is copied into `<repo>/memory/<name>/`. The supervisor
+  cannot read the live folder, so the copy is a pipe: a helper running as
+  the heteronym writes a stream of (path, bytes) records for the regular
+  files it can see, and the supervisor writes them into the clone. Symlinks
+  are never followed, `.git` is never copied, a path with `..`, an absolute
+  part or a `.git` component ends the copy with nothing changed, files over
+  5 MB are skipped and logged, and one heteronym's memory is capped at
+  50 MB;
+- the clone is committed (`memory: <names> (<time>)`) and pushed.
+
+The helper gets only `PATH`, `PYTHONPATH` and `LANG`: it runs as the
+heteronym, whose session could read a same-uid process's environment, so
+nothing of the supervisor's (git credentials, for one) reaches it. One
+heteronym's failed copy is logged and does not stop the others.
+
+### 7.3 When a push fails
+
+A rejected push is retried once after `git pull --rebase` (other classes'
+containers push to the same repository, under other heteronyms' folders).
+If the push still fails, or the rebase conflicts, the rebase is aborted,
+the commits stay in the local clone, the problem is logged, and every later
+interval tries again. Nothing is ever force-pushed and nothing is lost
+while the clone's volume survives.
+
+### 7.4 Restoring
+
+When a heteronym's live folder is empty (a new volume), it is filled from
+`<repo>/memory/<name>/` by the same pipe the other way round, written as
+the heteronym. A live folder with anything in it is never overwritten.
+
+Verified by: `tests/test_memory.py` (stream safety, git behaviour against a
+local origin including a rejected push and a conflict, and collect and
+restore with real users, one case with only the supervisor's three
+capabilities), `tests/test_supervise.py::MemorySync`.
+

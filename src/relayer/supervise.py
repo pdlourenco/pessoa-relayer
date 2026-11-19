@@ -95,6 +95,7 @@ class Supervisor:
         self.interval = interval
         self.environ = environ
         self.config: tuple[Runtime, dict[str, Heteronym]] | None = None
+        self.last_memory_sync = float("-inf")
         self.crashes: dict[str, _Crash] = {}
 
     def tick(self, now: float) -> list[str]:
@@ -172,11 +173,43 @@ class Supervisor:
         for a in actions:
             log.append(str(a))
         log += apply(actions, effective, self.backend, runtime, self.environ)
+        log += self._sync_memory(runtime, heteronyms, now)
         for a in actions:
             if a.kind in ("start", "restart"):
                 self.crashes.setdefault(a.name, _Crash()).started = now
             elif a.kind == "stop":
                 self.crashes.pop(a.name, None)
+        return log
+
+
+    def _sync_memory(self, runtime: Runtime, heteronyms, now: float) -> list[str]:
+        """Copy every heteronym's memory into the clone, commit, push (SPEC §7)."""
+        memory = getattr(self.backend, "memory", None)
+        if memory is None or now - self.last_memory_sync < runtime.memory_interval:
+            return []
+        self.last_memory_sync = now
+        log: list[str] = []
+        names = []
+        for ident in self.backend.accounts.known():
+            if ident.name not in heteronyms:
+                continue                       # another class's, or removed
+            if not Path(memory.live_dir(ident.name)).exists():
+                continue                       # never started here yet
+            try:
+                log += memory.collect(ident)
+                names.append(ident.name)
+            except Exception as exc:  # noqa: BLE001 - one heteronym must not stop the rest
+                log.append(f"memory {ident.name}: {exc}")
+        try:
+            if names and memory.commit(names, time.strftime("%Y-%m-%dT%H:%M:%S%z",
+                                                            time.localtime(now))):
+                log.append(f"memory: committed {', '.join(names)}")
+            if memory.push_state.blocked or names:
+                problem = memory.push()
+                if problem:
+                    log.append(f"memory: not pushed, kept locally: {problem}")
+        except Exception as exc:  # noqa: BLE001
+            log.append(f"memory: {exc}")
         return log
 
 

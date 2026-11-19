@@ -54,8 +54,8 @@ RUN arch="$(dpkg --print-architecture)"; \
 # Root-owned mount points. The supervisor runs as root with only CAP_CHOWN,
 # CAP_SETUID and CAP_SETGID (compose drops the rest) and gives each heteronym
 # its own Unix user, home and folders at run time (docs/SPEC.md §6).
-RUN mkdir -p /work /state /config /definitions /homes \
- && chmod 755 /work /homes && chmod 700 /state
+RUN mkdir -p /work /state /config /definitions /homes /memory /memory-repo \
+ && chmod 755 /work /homes /memory && chmod 700 /state /memory-repo
 
 COPY pyproject.toml README.md /opt/relayer/src-pkg/
 COPY src /opt/relayer/src-pkg/src
@@ -88,6 +88,6 @@ ENV LANG=C.UTF-8 \
     RELAYER_WORK_ROOT=/work \
     RELAYER_STATE=/state
 
-VOLUME ["/homes", "/work", "/state"]
+VOLUME ["/homes", "/work", "/state", "/memory"]
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["relayer", "supervise"]

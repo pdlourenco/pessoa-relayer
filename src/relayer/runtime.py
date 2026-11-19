@@ -16,13 +16,14 @@ from pathlib import Path
 from typing import Any
 
 from .config import (NAME_RE, SAFE_PATH_RE, ConfigError, Heteronym, _is_version,
-                     _load_yaml, _unknown_keys)
+                     _load_yaml, _unknown_keys, parse_duration)
 from .tiers import TIERS
 
 RUNTIME_KEYS = {"version", "class", "work_root", "models", "session", "tmux_socket",
-                "isolation", "homes", "uid_base"}
+                "isolation", "homes", "uid_base", "memory"}
 ISOLATION = ("users", "none")
-ENV_PLACEHOLDERS = {"home", "name", "user"}
+ENV_PLACEHOLDERS = {"home", "name", "user", "memory"}
+MEMORY_KEYS = {"repo", "live", "interval"}
 SESSION_KEYS = {"command", "env", "pass_env"}
 PLACEHOLDERS = {"model", "name", "workdir", "settings"}
 SOCKET_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -49,6 +50,9 @@ class Runtime:
     isolation: str = "users"        # "users": one Unix user per heteronym (SPEC §6)
     homes: str = "/homes"
     uid_base: int = 20000
+    memory_repo: str | None = None  # root-owned clone of the memory repository (SPEC §7)
+    memory_live: str = "/memory"    # each heteronym's own memory: <live>/<name>
+    memory_interval: int = 900
 
     def session_env(self, environ: dict[str, str],
                     identity: dict[str, str] | None = None) -> dict[str, str]:
@@ -63,6 +67,7 @@ class Runtime:
         env["TERM"] = DEFAULT_TERM
         env.update({k: environ[k] for k in self.pass_env if k in environ})
         values = {"home": env.get("HOME", ""), "user": env.get("USER", ""),
+                  "memory": env.get("RELAYER_MEMORY", ""),
                   "name": (identity or {}).get("USER", "").removeprefix("h-")}
         env.update({k: re.sub(r"\{(\w+)\}", lambda m: values[m.group(1)], v)
                     for k, v in self.env.items()})
@@ -96,7 +101,8 @@ class Runtime:
         shape = {"heteronym": heteronym.config_hash(), "model": self.models[heteronym.tier],
                  "command": list(self.command), "env": self.env,
                  "pass_env": list(self.pass_env), "base": list(BASE_ENV),
-                 "term": DEFAULT_TERM, "isolation": self.isolation}
+                 "term": DEFAULT_TERM, "isolation": self.isolation,
+                 "memory": self.memory_repo is not None}
         blob = json.dumps(shape, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
@@ -197,11 +203,35 @@ def load_runtime(path: Path) -> Runtime:
     if type(uid_base) is not int or not 1000 <= uid_base <= 2**31 - 100000:
         errors.append(f"{where}.uid_base: must be an integer from 1000")
 
+    memory = data.get("memory")
+    mem_repo, mem_live, mem_interval = None, "/memory", 900
+    if memory is not None:
+        if not isinstance(memory, dict):
+            errors.append(f"{where}.memory: must be a mapping")
+        else:
+            _unknown_keys(memory, MEMORY_KEYS, f"{where}.memory", errors)
+            mem_repo, mem_live = memory.get("repo"), memory.get("live", "/memory")
+            for key, value in (("repo", mem_repo), ("live", mem_live)):
+                if not isinstance(value, str) or not SAFE_PATH_RE.match(value) or value == "/":
+                    errors.append(f"{where}.memory.{key}: must be an absolute path "
+                                  "using [A-Za-z0-9._@+-/]")
+            try:
+                mem_interval = parse_duration(memory.get("interval", "15m"))
+            except ValueError as exc:
+                errors.append(f"{where}.memory.interval: {exc}")
+            if mem_interval is None:
+                errors.append(f"{where}.memory.interval: must be a duration, not never")
+            if isolation != "users":
+                errors.append(f"{where}.memory: needs isolation: users, so each "
+                              "heteronym writes only its own memory")
+
     if errors:
         raise ConfigError(errors)
     return Runtime(klass=klass, work_root=work_root, models=dict(models), command=tuple(command),
                    env=dict(env), pass_env=tuple(pass_env), tmux_socket=socket,
-                   isolation=isolation, homes=homes, uid_base=uid_base)
+                   isolation=isolation, homes=homes, uid_base=uid_base,
+                   memory_repo=mem_repo, memory_live=mem_live,
+                   memory_interval=mem_interval or 900)
 
 
 def check_environment(environ: dict[str, str]) -> list[str]:
