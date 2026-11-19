@@ -58,6 +58,26 @@ class Uids(unittest.TestCase):
         self.assertEqual(ident.as_user()[:3], ["setpriv", "--reuid=30000", "--regid=30000"])
 
 
+class Processes(unittest.TestCase):
+    def test_zombies_are_not_live_processes(self):
+        # A killed process stays a zombie until its parent reaps it; CI's
+        # runner adopts orphans and reaps late, which once made a clean stop
+        # look like a survivor.
+        from relayer.users import processes_of
+        child = subprocess.Popen(["true"])
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            with open(f"/proc/{child.pid}/status") as fh:
+                if "State:\tZ" in fh.read():
+                    break
+            time.sleep(0.02)
+        self.assertNotIn(child.pid, processes_of(os.getuid()))
+        live = subprocess.Popen(["sleep", "5"])
+        self.addCleanup(live.kill)
+        self.assertIn(live.pid, processes_of(os.getuid()))
+        child.wait()
+
+
 class SessionEnvironment(unittest.TestCase):
     def test_identity_replaces_the_supervisors(self):
         rt = Runtime(env={"CLAUDE_CONFIG_DIR": "{home}/.claude"})
@@ -152,13 +172,19 @@ class RealUsers(unittest.TestCase):
         """The container's real constraint: CHOWN, SETUID, SETGID and nothing
         else, so root cannot enter a heteronym's folder and nested folders
         must be made as the heteronym."""
+        # Root with these capabilities cannot read a checkout under a home
+        # it does not own (CI's /home/runner): give it a world-readable copy.
+        lib = self.root / "pylib"
+        shutil.copytree(Path(__file__).resolve().parent.parent / "src" / "relayer",
+                        lib / "relayer")
+        subprocess.run(["chmod", "-R", "a+rX", str(lib)], check=True)
         script = (
             "import sys; sys.path.insert(0, %r)\n"
             "from relayer.users import Accounts, UidMap\n"
             "from pathlib import Path\n"
             "a = Accounts(UidMap(Path(%r), %d), %r)\n"
             "a.prepare('pa', (%r, %r))\n"
-        ) % (str(Path(__file__).resolve().parent.parent / "src"),
+        ) % (str(lib),
              str(self.root / "state" / "users.json"), self.base, str(self.root / "homes"),
              str(self.root / "work" / "pa"), str(self.root / "work" / "pa" / "notes"))
         proc = subprocess.run(["setpriv", "--bounding-set=-all,+chown,+setuid,+setgid",

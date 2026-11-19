@@ -234,19 +234,23 @@ class Accounts:
 
 
 def processes_of(uid: int) -> list[int]:
-    """PIDs whose real uid is ``uid`` (readable from /proc by anyone)."""
+    """Live PIDs whose real uid is ``uid`` (readable from /proc by anyone).
+
+    Zombies are left out: killed but not yet reaped by their parent, they
+    run nothing and hold nothing but a process-table entry.
+    """
     pids = []
     for entry in os.scandir("/proc"):
         if not entry.name.isdigit():
             continue
         try:
             with open(f"/proc/{entry.name}/status") as fh:
-                for line in fh:
-                    if line.startswith("Uid:"):
-                        if int(line.split()[1]) == uid:
-                            pids.append(int(entry.name))
-                        break
-        except (OSError, ValueError, IndexError):
+                fields = dict(line.split(":", 1) for line in fh if ":" in line)
+            if fields["State"].split()[0] in ("Z", "X"):
+                continue
+            if int(fields["Uid"].split()[0]) == uid:
+                pids.append(int(entry.name))
+        except (OSError, ValueError, KeyError, IndexError):
             continue                     # gone, or not ours to read
     return pids
 
