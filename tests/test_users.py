@@ -14,7 +14,39 @@ from unittest import mock
 from relayer.cli import _backend
 from relayer.runtime import Runtime
 from relayer.sessions import UserTmuxBackend
-from relayer.users import AccountError, Accounts, UidMap
+from relayer.users import AccountError, Accounts, UidMap, processes_of, run_as
+
+# Run as a heteronym: SIGSTOP every other process of its uid, as fast as it
+# can, so any helper running as that uid is frozen before it acts.
+STOPPER = """
+import os, signal, time
+me, uid = os.getpid(), os.getuid()
+while True:
+    for d in os.listdir('/proc'):
+        if d.isdigit() and int(d) != me:
+            try:
+                if os.stat('/proc/' + d).st_uid == uid:
+                    os.kill(int(d), signal.SIGSTOP)
+            except OSError:
+                pass
+    time.sleep(0.002)
+"""
+
+
+def finishes(fn, limit):
+    """Run fn in a thread; (finished, result or exception)."""
+    import threading
+    box = {}
+
+    def go():
+        try:
+            box["ok"] = fn()
+        except BaseException as exc:  # noqa: BLE001
+            box["err"] = exc
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(limit)
+    return not t.is_alive(), box
 
 from helpers import heteronym
 
@@ -337,21 +369,19 @@ class RealUsers(unittest.TestCase):
     def _assert_listing_survives(self, attack):
         """Start pa, let ``attack(ident, backend)`` make its tmux server
         unresponsive, then list: it must come back, report pa, and leave pa
-        nothing running (probe review of #6)."""
-        import threading
-        from relayer.users import processes_of
+        nothing running (probe review of #6). Popen.kill fails as it does
+        for root without CAP_KILL, so nothing may rely on it."""
         backend = UserTmuxBackend(f"relayer-it-{os.getpid()}", self.accounts, timeout=1)
         pa = self.h("pa")
         backend.prepare(pa)
         backend.start("pa", "sleep 300", pa.folders[0], "ab12")
         ident = self.accounts.identity("pa")
         attack(ident, backend)
-        result = {}
-        t = threading.Thread(target=lambda: result.update(listed=backend.list()), daemon=True)
-        t.start()
-        t.join(30)
-        self.assertFalse(t.is_alive(), "list() stalled on an unresponsive tmux server")
-        self.assertNotIn("pa", result["listed"])
+        with mock.patch("subprocess.Popen.kill", side_effect=PermissionError(1, "EPERM")):
+            done, result = finishes(backend.list, 30)
+        self.assertTrue(done, "list() stalled on an unresponsive tmux server")
+        self.assertNotIn("err", result, result.get("err"))
+        self.assertNotIn("pa", result["ok"])
         self.assertTrue(any("pa" in e for e in backend.errors), backend.errors)
         self.assertEqual(processes_of(ident.uid), [])
 
@@ -362,6 +392,32 @@ class RealUsers(unittest.TestCase):
             subprocess.run([*ident.as_user(), "pkill", "-STOP", "-u", str(ident.uid), "tmux"],
                            check=True)
         self._assert_listing_survives(stop_server)
+
+    def test_a_heteronym_stopping_its_own_processes_does_not_stall_listing(self):
+        """Second review of #6: a kill run as the heteronym can be stopped by
+        it before it signals; the kill must come from outside its reach."""
+        def stop_everything(ident, backend):
+            subprocess.run([*ident.as_user(), "setsid", "-f", "python3", "-c", STOPPER],
+                           check=True)
+            time.sleep(0.5)                       # the stopper has frozen the server
+        self._assert_listing_survives(stop_everything)
+
+    def test_a_command_run_as_the_heteronym_is_bounded(self):
+        ident = self.accounts.prepare("pa", ())
+        subprocess.run([*ident.as_user(), "setsid", "-f", "python3", "-c", STOPPER],
+                       check=True)
+        time.sleep(0.3)
+        with mock.patch("subprocess.Popen.kill", side_effect=PermissionError(1, "EPERM")):
+            done, result = finishes(lambda: run_as(ident, ["sleep", "60"], timeout=1), 20)
+        self.assertTrue(done, "run_as stalled on a stopped process")
+        self.assertIsInstance(result.get("err"), AccountError)
+        def argv0(pid):
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                    return fh.read().split(b"\0")[0]
+            except OSError:
+                return b""
+        self.assertNotIn(b"sleep", [argv0(p) for p in processes_of(ident.uid)])
 
     def test_a_silent_listener_on_the_socket_does_not_stall_listing(self):
         def squat(ident, backend):

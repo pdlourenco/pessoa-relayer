@@ -15,7 +15,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 
-from .users import processes_of
+from .users import kill_as, processes_of
 from typing import Protocol
 
 HASH_OPTION = "@relayer_hash"
@@ -50,7 +50,7 @@ class SessionTimeout(SessionError):
 
 class TmuxBackend:
     def __init__(self, socket: str, tmux: str = "tmux", prefix: list[str] | None = None,
-                 home: str | None = None, timeout: float = TMUX_TIMEOUT):
+                 home: str | None = None, timeout: float = TMUX_TIMEOUT, kill=None):
         # ``prefix`` runs tmux as another user (setpriv), so that user owns
         # the tmux server and every session in it (docs/SPEC.md §6).
         self._base = [*(prefix or []), tmux, "-L", socket, "-f", "/dev/null"]
@@ -63,7 +63,9 @@ class TmuxBackend:
             # /tmp/tmux-<uid>, which another heteronym could create first
             # (uids are predictable) and so block this one's server.
             self._env["TMUX_TMPDIR"] = home
-        self._prefix = list(prefix or [])
+        # ``kill(pids)`` ends a timed-out client run through ``prefix``
+        # (relayer.users.kill_as for that user); without one, proc.kill().
+        self._kill = kill
         self.timeout = timeout
 
     def _call(self, args: tuple[str, ...]) -> subprocess.CompletedProcess:
@@ -74,11 +76,9 @@ class TmuxBackend:
             out, err = proc.communicate(timeout=self.timeout)
         except subprocess.TimeoutExpired:
             # subprocess.run would call proc.kill() here, which fails: the
-            # client runs as the heteronym and root holds no CAP_KILL. Kill
-            # it as the user it runs as.
-            if self._prefix:
-                subprocess.run([*self._prefix, "kill", "-9", str(proc.pid)],
-                               capture_output=True)
+            # client runs as the heteronym and root holds no CAP_KILL.
+            if self._kill is not None:
+                self._kill([proc.pid])
             else:
                 proc.kill()
             # Wait for the process, not for end-of-file: the tmux client
@@ -177,7 +177,7 @@ class UserTmuxBackend:
 
     def _for(self, ident) -> TmuxBackend:
         return TmuxBackend(self.socket, self.tmux, prefix=ident.as_user(), home=ident.home,
-                           timeout=self.timeout)
+                           timeout=self.timeout, kill=ident.kill)
 
     def list(self) -> dict[str, Running]:
         running: dict[str, Running] = {}
@@ -225,7 +225,12 @@ class UserTmuxBackend:
         return env
 
     def start(self, name, command, workdir, config_hash):
-        self._for(self.accounts.identity(name)).start(name, command, workdir, config_hash)
+        ident = self.accounts.identity(name)
+        try:
+            self._for(ident).start(name, command, workdir, config_hash)
+        except SessionTimeout:
+            self._kill_all(ident)         # as for a listing that times out
+            raise
 
     def stop(self, name):
         ident = self.accounts.identity(name)
@@ -240,18 +245,17 @@ class UserTmuxBackend:
     def _kill_all(self, ident) -> None:
         """End every process of the heteronym's uid, or raise SessionError.
 
-        Signal each live process by pid, as that user (root here has no
-        CAP_KILL), and repeat: a process forking meanwhile can add a child
-        the previous round did not see. procps kill takes "-9 PID…"; it
-        reads "-s KILL -- -1" as a usage error.
+        Signal each live process by pid (relayer.users.kill_as: root here
+        has no CAP_KILL, and a kill run as the heteronym could be stopped
+        by it), and repeat: a process forking meanwhile can add a child the
+        previous round did not see.
         """
         deadline = time.time() + 5
         while time.time() < deadline:
             pids = processes_of(ident.uid)
             if not pids:
                 break
-            subprocess.run([*ident.as_user(), "kill", "-9", *map(str, pids)],
-                           capture_output=True)
+            kill_as(ident.uid, pids)
             time.sleep(0.1)
         left = processes_of(ident.uid)
         if left:

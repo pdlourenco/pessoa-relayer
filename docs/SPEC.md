@@ -366,16 +366,25 @@ are owned by its user, mode 700.
   any other session it makes there is ignored. A server that cannot be
   listed is logged and skipped, so one heteronym can never stop the
   reconcile of its class.
-- Every tmux call has a 10-second limit. A heteronym owns its server and
-  can stop it, or put a listener that never answers on its socket; a call
-  that runs out of time is logged, and every process of that heteronym's
-  uid is ended, as on a stop. If it is still enabled, the next pass starts
-  it afresh.
+- Every tmux call has a 10-second limit, and every other command run as a
+  heteronym (folder preparation, §6.2) a 30-second one. A heteronym owns
+  its server and every process of its uid: it can stop them, or put a
+  listener that never answers on its socket. A listing or start that runs
+  out of time is logged, and every process of that heteronym's uid is
+  ended, as on a stop; if it is still enabled, a later pass starts it
+  afresh, under the crash back-off (§5) when it is killed soon after
+  starting. The limits are a trade-off: on a host so loaded that an honest
+  tmux call takes longer, that heteronym's session is ended too.
+- Root holds no `CAP_KILL`, and a `kill` run as the heteronym could be
+  stopped by it before it signals. So signals come from a forked child
+  that takes the heteronym's uid as its effective uid only, keeping real
+  and saved uid 0: the kernel lets it signal the heteronym's processes,
+  and the heteronym can neither signal nor trace it.
 - A heteronym whose uid has processes but no recognisable session (it
   renamed or re-tagged its session, or left a daemon) is listed as running
   with no hash, so it is stopped or restarted like any other.
 - Stopping a heteronym ends its tmux session and then every process its uid
-  runs (`kill -9` on each of its pids, as that user, repeated until none is
+  runs (SIGKILL to each of its pids, as above, repeated until none is
   left); a stop that leaves a process behind after 5 seconds is reported as
   failed.
 - Each heteronym signs in once, on its own: `relayer login <name>` runs the
