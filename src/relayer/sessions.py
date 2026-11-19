@@ -14,6 +14,8 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
+
+from .users import processes_of
 from typing import Protocol
 
 HASH_OPTION = "@relayer_hash"
@@ -143,6 +145,12 @@ class UserTmuxBackend:
                 continue
             if ident.name in found:
                 running[ident.name] = found[ident.name]
+            elif processes_of(ident.uid):
+                # Processes but no recognisable session: a session renamed
+                # or mis-tagged by the heteronym, or a daemon it left. List
+                # it untagged, so plan() stops or restarts it; it must not be
+                # able to hide from a stop by hiding its session.
+                running[ident.name] = Running(ident.name, "", 0)
         return running
 
     def prepare(self, heteronym) -> None:
@@ -155,5 +163,17 @@ class UserTmuxBackend:
         self._for(self.accounts.identity(name)).start(name, command, workdir, config_hash)
 
     def stop(self, name):
-        self._for(self.accounts.identity(name)).stop(name)
+        ident = self.accounts.identity(name)
+        try:
+            self._for(ident).stop(name)
+        except SessionError:
+            pass                          # already gone, or hidden: the kill below covers it
+        # kill-session ends the tmux session, not a daemon the heteronym
+        # started with setsid; end everything its uid runs (docs/SPEC.md §6.3).
+        subprocess.run([*ident.as_user(), "kill", "-KILL", "-1"], capture_output=True)
+        deadline = time.time() + 2
+        while processes_of(ident.uid) and time.time() < deadline:
+            time.sleep(0.05)
+        if processes_of(ident.uid):
+            raise SessionError(f"processes of {ident.user} survived the stop")
 

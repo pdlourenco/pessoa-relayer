@@ -342,9 +342,11 @@ are owned by its user, mode 700.
   component with `O_NOFOLLOW`, and creates, chmods and chowns only through
   descriptors. A heteronym that swaps a directory for a symlink in its own
   folder therefore cannot redirect anything root does.
-- Root acts only on root-owned components. From the first component the
-  heteronym owns, the rest of the path is created and fixed as the
-  heteronym (`setpriv`), which can do nothing it could not do itself.
+- Root acts only on root-owned components. A parent it creates on the way
+  down stays root's, mode 755; only the final folder is handed over, so two
+  heteronyms' folders can share a parent that neither owns. From the first
+  component the heteronym owns, the rest of the path is created and fixed
+  as the heteronym (`setpriv`), which can do nothing it could not do itself.
 - A component owned by anyone else, a symlink, or a file is refused, and
   that heteronym's session is not started.
 
@@ -359,6 +361,12 @@ are owned by its user, mode 700.
   any other session it makes there is ignored. A server that cannot be
   listed is logged and skipped, so one heteronym can never stop the
   reconcile of its class.
+- A heteronym whose uid has processes but no recognisable session (it
+  renamed or re-tagged its session, or left a daemon) is listed as running
+  with no hash, so it is stopped or restarted like any other.
+- Stopping a heteronym ends its tmux session and then every process its uid
+  runs (`kill -KILL -1` as that user); a stop that leaves a process behind
+  is reported as failed.
 - Each heteronym signs in once, on its own: `relayer login <name>` runs the
   agent program interactively as that user, in its workspace, with the
   session's environment. Its credentials then live in its own home.

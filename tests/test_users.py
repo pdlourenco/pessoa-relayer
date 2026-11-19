@@ -245,6 +245,32 @@ class RealUsers(unittest.TestCase):
         self.assertNotEqual(stranger.uid, old.uid)
         self.assertEqual(self.accounts.identity("pz").uid, old.uid)   # rebuilt from its home
 
+    def test_parents_made_on_the_way_stay_roots(self):
+        d = str(self.root / "work" / "projects" / "delta")
+        e = str(self.root / "work" / "projects" / "eps")
+        self.accounts.prepare("delta", (d,))
+        parent = os.stat(self.root / "work" / "projects")
+        self.assertEqual((parent.st_uid, parent.st_mode & 0o777), (0, 0o755))
+        self.accounts.prepare("eps", (e,))           # not refused: the parent is root's
+        self.assertEqual(os.stat(e).st_uid, self.accounts.identity("eps").uid)
+
+    def test_a_hidden_session_and_its_daemons_are_still_stopped(self):
+        backend = UserTmuxBackend(f"relayer-it-{os.getpid()}", self.accounts)
+        pa = self.h("pa")
+        backend.prepare(pa)
+        backend.start("pa", "sleep 300", pa.folders[0], "ab12")
+        ident = self.accounts.identity("pa")
+        env = ["env", f"HOME={ident.home}", f"TMUX_TMPDIR={ident.home}"]
+        # Hide the session from listing, and leave a detached daemon.
+        subprocess.run([*ident.as_user(), *env, "tmux", "-L", backend.socket,
+                        "set-option", "-t", "pa", "@relayer_hash", "x|y"], check=True)
+        subprocess.run([*ident.as_user(), "setsid", "-f", "sleep", "301"], check=True)
+        listed = backend.list()
+        self.assertEqual(listed["pa"].config_hash, "")      # seen, untagged
+        backend.stop("pa")
+        self.assertEqual(__import__("relayer.users", fromlist=["x"]).processes_of(ident.uid), [])
+        self.assertEqual(backend.list(), {})
+
     def test_session_runs_as_its_user_and_others_cannot_look_in(self):
         backend = UserTmuxBackend(f"relayer-it-{os.getpid()}", self.accounts)
         pa = self.h("pa")

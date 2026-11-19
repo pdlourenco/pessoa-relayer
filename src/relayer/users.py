@@ -201,12 +201,15 @@ class Accounts:
                 st = os.fstat(fd)
                 here = os.path.join(*parts[:i + 1])
                 if st.st_uid == 0:
-                    if created or last:
+                    if last:
                         os.fchmod(fd, 0o700)          # by descriptor: no path to swap
                         os.fchown(fd, ident.uid, ident.gid)
-                        if not last:
-                            self._as_user_rest(ident, path)
                         return
+                    if created:
+                        # A parent made on the way down stays root's and
+                        # traversable: handing it over would give this
+                        # heteronym its siblings' parent.
+                        os.fchmod(fd, 0o755)
                     continue                          # a root-owned ancestor: go on
                 if st.st_uid == ident.uid:
                     self._as_user_rest(ident, path)
@@ -228,6 +231,24 @@ class Accounts:
         for folder in folders:
             self.ensure_dir(ident, folder)
         return ident
+
+
+def processes_of(uid: int) -> list[int]:
+    """PIDs whose real uid is ``uid`` (readable from /proc by anyone)."""
+    pids = []
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry.name}/status") as fh:
+                for line in fh:
+                    if line.startswith("Uid:"):
+                        if int(line.split()[1]) == uid:
+                            pids.append(int(entry.name))
+                        break
+        except (OSError, ValueError, IndexError):
+            continue                     # gone, or not ours to read
+    return pids
 
 
 def _run(argv: list[str]) -> None:
