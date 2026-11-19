@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from .config import ConfigError, load_personas, load_templates
+from .config import ConfigError, load_heteronyms, load_templates
 from .reconcile import apply, plan
 from .runtime import Runtime, check_environment, load_runtime
 from .sessions import SessionError, TmuxBackend
@@ -15,9 +15,9 @@ from .sessions import SessionError, TmuxBackend
 
 def _common(parser: argparse.ArgumentParser, runtime_required: bool) -> None:
     parser.add_argument(
-        "--personas", type=Path,
-        default=Path(os.environ.get("RELAYER_PERSONAS", "personas.yaml")),
-        help="personas file (env RELAYER_PERSONAS; default ./personas.yaml)")
+        "--heteronyms", type=Path,
+        default=Path(os.environ.get("RELAYER_HETERONYMS", "heteronyms.yaml")),
+        help="heteronyms file (env RELAYER_HETERONYMS; default ./heteronyms.yaml)")
     parser.add_argument(
         "--templates", type=Path,
         default=Path(os.environ.get("RELAYER_TEMPLATES", "templates")),
@@ -38,8 +38,8 @@ def _load(args: argparse.Namespace):
     runtime = load_runtime(args.runtime) if args.runtime else Runtime()
     work_root = args.work_root or runtime.work_root
     templates = load_templates(args.templates)
-    personas = load_personas(args.personas, templates, work_root)
-    return runtime, templates, personas
+    heteronyms = load_heteronyms(args.heteronyms, templates, work_root)
+    return runtime, templates, heteronyms
 
 
 def _errors(lines: list[str]) -> None:
@@ -49,14 +49,14 @@ def _errors(lines: list[str]) -> None:
 
 def cmd_validate(args: argparse.Namespace) -> int:
     try:
-        _, templates, personas = _load(args)
+        _, templates, heteronyms = _load(args)
     except ConfigError as exc:
         _errors(exc.errors)
         return 1
-    for name, p in sorted(personas.items()):
+    for name, p in sorted(heteronyms.items()):
         state = "enabled" if p.enabled else "disabled"
         print(f"{name}: template={p.template} tier={p.tier} {state}")
-    print(f"ok: {len(personas)} persona(s), {len(templates)} template(s)")
+    print(f"ok: {len(heteronyms)} heteronym(s), {len(templates)} template(s)")
     return 0
 
 
@@ -66,14 +66,14 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         _errors(problems)
         return 2
     try:
-        runtime, _, personas = _load(args)
+        runtime, _, heteronyms = _load(args)
     except ConfigError as exc:
         _errors(exc.errors)
         return 1
     environ = dict(os.environ)
     backend = TmuxBackend(runtime.tmux_socket)
     try:
-        actions = plan(personas, backend.list(),
+        actions = plan(heteronyms, backend.list(),
                        runtime.session_hash)
     except SessionError as exc:
         _errors([str(exc)])
@@ -84,7 +84,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         print("ok: nothing to do")
     if args.dry_run:
         return 0
-    failures = apply(actions, personas, backend, runtime, environ)
+    failures = apply(actions, heteronyms, backend, runtime, environ)
     _errors(failures)
     return 1 if failures else 0
 
@@ -93,12 +93,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="relayer")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    validate = sub.add_parser("validate", help="check personas.yaml and templates")
+    validate = sub.add_parser("validate", help="check heteronyms.yaml and templates")
     _common(validate, runtime_required=False)
     validate.set_defaults(func=cmd_validate)
 
     reconcile = sub.add_parser(
-        "reconcile", help="start, stop and restart sessions to match personas.yaml")
+        "reconcile", help="start, stop and restart sessions to match heteronyms.yaml")
     _common(reconcile, runtime_required=True)
     reconcile.add_argument("--dry-run", action="store_true",
                            help="print the actions without carrying them out")

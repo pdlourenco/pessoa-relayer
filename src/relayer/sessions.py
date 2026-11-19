@@ -1,4 +1,4 @@
-"""Session backends. The tmux backend runs each persona in a tmux session on
+"""Session backends. The tmux backend runs each heteronym in a tmux session on
 a dedicated server socket, so the runtime never touches other tmux sessions.
 
 Hardening (docs/SPEC.md §4.2): tmux runs with ``-f /dev/null`` (no user

@@ -1,6 +1,6 @@
 # A development orchestrator for one repository. It gets repository write
 # access and a forge token, so it is never created from chat: add it by
-# editing personas.yaml (docs/SPEC.md §2.2).
+# editing heteronyms.yaml (docs/SPEC.md §2.2).
 version: 1
 description: Development orchestrator for one repository.
 max_tier: frontier

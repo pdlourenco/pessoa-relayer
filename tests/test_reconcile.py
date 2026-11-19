@@ -8,7 +8,7 @@ from relayer.reconcile import Action, apply, plan
 from relayer.runtime import Runtime
 from relayer.sessions import Running
 
-from helpers import FakeBackend, persona
+from helpers import FakeBackend, heteronym
 
 
 def H(p):
@@ -26,39 +26,39 @@ def running(p, config_hash=None):
 
 class Plan(unittest.TestCase):
     def test_nothing_to_do_when_in_sync(self):
-        pa = persona()
+        pa = heteronym()
         self.assertEqual(P({"pa": pa}, {"pa": running(pa)}), [])
 
     def test_start_missing(self):
-        self.assertEqual(P({"pa": persona()}, {}),
+        self.assertEqual(P({"pa": heteronym()}, {}),
                          [Action("start", "pa", "not running")])
 
     def test_disabled_not_started(self):
-        self.assertEqual(P({"pa": persona(enabled=False)}, {}), [])
+        self.assertEqual(P({"pa": heteronym(enabled=False)}, {}), [])
 
     def test_stop_disabled(self):
-        pa = persona(enabled=False)
+        pa = heteronym(enabled=False)
         self.assertEqual(P({"pa": pa}, {"pa": running(pa)}),
                          [Action("stop", "pa", "disabled")])
 
     def test_stop_removed(self):
         self.assertEqual(P({}, {"old": Running("old", "x", 0)}),
-                         [Action("stop", "old", "not in personas.yaml")])
+                         [Action("stop", "old", "not in heteronyms.yaml")])
 
     def test_restart_on_hash_change(self):
-        pa = persona()
+        pa = heteronym()
         self.assertEqual(P({"pa": pa}, {"pa": running(pa, "stale")}),
                          [Action("restart", "pa", "configuration changed")])
 
     def test_untagged_session_restarts(self):
         # A session that lost its hash tag cannot be trusted to match.
-        pa = persona()
+        pa = heteronym()
         self.assertEqual([a.kind for a in plan({"pa": pa}, {"pa": running(pa, "")}, H)],
                          ["restart"])
 
     def test_order_stops_then_restarts_then_starts(self):
-        a, b = persona("a"), persona("b")
-        actions = plan({"a": a, "b": b, "c": persona("c")},
+        a, b = heteronym("a"), heteronym("b")
+        actions = plan({"a": a, "b": b, "c": heteronym("c")},
                        {"a": running(a, "stale"), "z": Running("z", "", 0)}, H)
         self.assertEqual([(x.kind, x.name) for x in actions],
                          [("stop", "z"), ("restart", "a"), ("start", "b"), ("start", "c")])
@@ -76,7 +76,7 @@ class Apply(unittest.TestCase):
     ENV = {"PATH": "/bin", "HOME": "/home/a", "GH_TOKEN": "secret"}
 
     def test_start_passes_command_workdir_hash(self):
-        pa = persona(folder=f"{self.tmp.name}/pa")
+        pa = heteronym(folder=f"{self.tmp.name}/pa")
         backend = FakeBackend()
         errors = apply([Action("start", "pa", "")], {"pa": pa}, backend, self.runtime, self.ENV)
         self.assertEqual(errors, [])
@@ -90,13 +90,13 @@ class Apply(unittest.TestCase):
                          ("pa", f"{self.tmp.name}/pa", self.runtime.session_hash(pa)))
 
     def test_restart_stops_then_starts(self):
-        pa = persona(folder=f"{self.tmp.name}/pa")
+        pa = heteronym(folder=f"{self.tmp.name}/pa")
         backend = FakeBackend()
         apply([Action("restart", "pa", "")], {"pa": pa}, backend, self.runtime, self.ENV)
         self.assertEqual([c[0] for c in backend.calls], ["stop", "start"])
 
     def test_missing_path_is_reported_not_started(self):
-        pa = persona(folder=f"{self.tmp.name}/pa")
+        pa = heteronym(folder=f"{self.tmp.name}/pa")
         backend = FakeBackend()
         errors = apply([Action("start", "pa", "")], {"pa": pa}, backend, self.runtime,
                        {"HOME": "/h"})
@@ -104,8 +104,8 @@ class Apply(unittest.TestCase):
         self.assertEqual(backend.calls, [])
 
     def test_one_failure_does_not_block_others(self):
-        a = persona("a", folder=f"{self.tmp.name}/a")
-        b = persona("b", folder=f"{self.tmp.name}/b")
+        a = heteronym("a", folder=f"{self.tmp.name}/a")
+        b = heteronym("b", folder=f"{self.tmp.name}/b")
         backend = FakeBackend(fail={"a"})
         errors = apply([Action("start", "a", ""), Action("start", "b", "")],
                        {"a": a, "b": b}, backend, self.runtime, self.ENV)
