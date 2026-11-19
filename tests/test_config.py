@@ -295,6 +295,19 @@ class Rejections(unittest.TestCase):
         with self.assertRaises(ConfigError):
             load_personas(ws.root, templates)
 
+    def test_folder_characters_tmux_would_interpret(self):
+        # tmux expands #(cmd) in a start directory; ";" splits its commands.
+        for folder in ("{work}/{name}/#(id)", "{work}/{name}/a;b", "{work}/{name}/a b",
+                       "{work}/{name}/a\\nb"):
+            with self.subTest(folder=folder):
+                self.assertRejected(
+                    persona_file(f"pa: {{template: assistant, folders: [\"{folder}\"]}}\n"),
+                    "has characters outside")
+
+    def test_work_root_unsafe_characters(self):
+        self.assertRejected(persona_file("pa: {template: assistant}\n"),
+                            "work root", work_root="/w#x")
+
     def test_all_errors_reported_together(self):
         ws = Workspace(persona_file("""\
             pa: {template: assistant, tier: frontier}

@@ -25,6 +25,10 @@ from .tiers import TIERS, rank
 
 FORMAT_VERSION = 1
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+# Resolved folders and the work root use this character set only. tmux
+# expands formats such as #(cmd) in a session's start directory, and a
+# trailing ";" splits a tmux command line; neither character can appear.
+SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9._@+/-]*$")
 DURATION_RE = re.compile(r"^([1-9][0-9]*)([mhd])$")
 DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400}
 
@@ -188,6 +192,8 @@ def resolve_folder(pattern: str, work_root: str, name: str) -> str:
     path = posixpath.normpath("/" + path.lstrip("/"))
     if path == "/":
         raise ValueError("resolves to /, which would contain every folder")
+    if not SAFE_PATH_RE.match(path):
+        raise ValueError(f"{path!r} has characters outside [A-Za-z0-9._@+-/]")
     return path
 
 
@@ -405,10 +411,10 @@ def load_personas(path: Path, templates: dict[str, Template],
 
     if (not work_root.startswith("/") or work_root.startswith("//")
             or posixpath.normpath(work_root) != work_root or work_root == "/"
-            or "{" in work_root or "}" in work_root):
+            or not SAFE_PATH_RE.match(work_root)):
         raise ConfigError(errors + [f"work root {work_root!r} must be an "
                                     "absolute, normalised path below /, "
-                                    "without braces"])
+                                    "using only [A-Za-z0-9._@+-/]"])
 
     personas: dict[str, Persona] = {}
     for name, entry in entries.items():

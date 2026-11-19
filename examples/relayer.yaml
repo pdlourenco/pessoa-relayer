@@ -9,5 +9,8 @@ models:
   frontier: fable
 session:
   command: ["claude", "--model", "{model}", "--settings", "{settings}"]
+  # Sessions inherit nothing (docs/SPEC.md §4.2). HOME, PATH and LANG are
+  # passed, TERM is set; list anything else here. The image sets these.
+  pass_env: [CLAUDE_CONFIG_DIR, DISABLE_AUTOUPDATER, DISABLE_UPDATES]
   env: {}
 tmux_socket: pessoa

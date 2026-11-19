@@ -70,9 +70,11 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     except ConfigError as exc:
         _errors(exc.errors)
         return 1
+    environ = dict(os.environ)
     backend = TmuxBackend(runtime.tmux_socket)
     try:
-        actions = plan(personas, backend.list())
+        actions = plan(personas, backend.list(),
+                       lambda p: runtime.session_hash(p, environ))
     except SessionError as exc:
         _errors([str(exc)])
         return 1
@@ -82,7 +84,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         print("ok: nothing to do")
     if args.dry_run:
         return 0
-    failures = apply(actions, personas, backend, runtime)
+    failures = apply(actions, personas, backend, runtime, environ)
     _errors(failures)
     return 1 if failures else 0
 

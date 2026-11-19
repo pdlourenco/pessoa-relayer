@@ -1,6 +1,7 @@
 """Runtime config and the API-key guard (docs/SPEC.md §3)."""
 
 import json
+import shlex
 import tempfile
 import textwrap
 import unittest
@@ -54,7 +55,47 @@ class RuntimeConfig(unittest.TestCase):
 
     def test_api_key_in_session_env(self):
         self.rejected(GOOD + "  env: {ANTHROPIC_API_KEY: sk-x}\n",
-                      "session.env.ANTHROPIC_API_KEY: not allowed")
+                      "ANTHROPIC_API_KEY not allowed")
+
+    def test_forbidden_names_in_pass_env(self):
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                     "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"):
+            with self.subTest(name=name):
+                self.rejected(GOOD + f"  pass_env: [{name}]\n", f"{name} not allowed")
+
+    def test_bad_env_name(self):
+        self.rejected(GOOD + "  env: {'A B': x}\n", "is not a valid variable name")
+
+    def test_program_name_with_equals(self):
+        self.rejected(GOOD.replace('["claude",', '["X=1",'), "may not contain '='")
+
+    def test_session_env_is_only_what_is_listed(self):
+        rt = self.load(GOOD + "  pass_env: [KEEP]\n  env: {LIT: v}\n")
+        env = rt.session_env({"HOME": "/h", "PATH": "/p", "KEEP": "k",
+                              "GH_TOKEN": "t", "ANTHROPIC_API_KEY": "sk"})
+        self.assertEqual(env, {"HOME": "/h", "PATH": "/p", "TERM": "screen-256color",
+                               "KEEP": "k", "LIT": "v"})
+
+    def test_command_is_shell_safe(self):
+        # A trailing ";" in an argument must stay inside quotes: tmux treats a
+        # bare trailing ";" as a command separator.
+        rt = self.load(GOOD.replace('"{settings}"]', '"{settings}", "x;"]'))
+        cmd = rt.session_command(persona(allow=("Bash(echo $HOME; rm *)",)), {"PATH": "/p"})
+        self.assertFalse(cmd.endswith(";"))
+        words = shlex.split(cmd)
+        self.assertEqual(words[-1], "x;")
+        self.assertEqual(json.loads(words[-2])["permissions"]["allow"],
+                         ["Bash(echo $HOME; rm *)"])
+
+    def test_session_hash_tracks_runtime_changes(self):
+        p = persona()
+        a = self.load(GOOD)
+        b = self.load(GOOD.replace("strong: o", "strong: o2").replace("standard: s", "standard: s2"))
+        c = self.load(GOOD + "  env: {X: '1'}\n")
+        env = {"PATH": "/p"}
+        self.assertNotEqual(a.session_hash(p, env), b.session_hash(p, env))
+        self.assertNotEqual(a.session_hash(p, env), c.session_hash(p, env))
+        self.assertEqual(a.session_hash(p, env), a.session_hash(p, dict(env)))
 
     def test_bad_socket(self):
         self.rejected(GOOD + "tmux_socket: ../x\n", "tmux_socket: must match")
@@ -66,6 +107,7 @@ class RuntimeConfig(unittest.TestCase):
 class ApiKeyGuard(unittest.TestCase):
     def test_flags_key_in_environment(self):
         self.assertEqual(len(check_environment({"ANTHROPIC_API_KEY": "sk-x"})), 1)
+        self.assertEqual(len(check_environment({"CLAUDE_CODE_USE_BEDROCK": "1"})), 1)
         self.assertEqual(check_environment({"ANTHROPIC_API_KEY": ""}), [])
         self.assertEqual(check_environment({"PATH": "/bin"}), [])
 

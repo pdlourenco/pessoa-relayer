@@ -21,8 +21,8 @@ class FakeBackend:
     def list(self):
         return dict(self.running)
 
-    def start(self, name, argv, workdir, env, config_hash):
-        self.calls.append(("start", name, list(argv), workdir, dict(env), config_hash))
+    def start(self, name, command, workdir, config_hash):
+        self.calls.append(("start", name, command, workdir, config_hash))
         if name in self.fail:
             raise RuntimeError("boom")
 

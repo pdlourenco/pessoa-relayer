@@ -35,7 +35,10 @@ personas:
   to models; personas never name a model.
 - A `<folder pattern>` is an absolute path after substituting `{work}` (the
   work root, `/work` inside the container unless configured) and `{name}`.
-  No other placeholders are allowed.
+  No other placeholders are allowed. The resolved path may only use
+  `A–Z a–z 0–9 . _ @ + - /`: tmux expands formats such as `#(cmd)` in a
+  session's start directory and treats a trailing `;` as a command
+  separator, so neither may reach it.
 - `<duration>` is `<n>m`, `<n>h`, `<n>d` (n ≥ 1) or `never`.
 - Unknown keys anywhere are errors. Duplicate keys are errors.
 
@@ -67,9 +70,9 @@ Verified by: `tests/test_config.py::Rejections` (`test_overlapping_personas`,
 
 ### 1.4 Configuration hash
 
-Each persona has a hash of everything that shapes its running session:
-template, tier, channel, resolved folders, allow and deny lists. A change of
-hash means the session must restart. `enabled` and `idle_stop` are not in
+Each persona has a hash of its own settings: template, tier, channel,
+resolved folders, allow and deny lists. The reconciler combines it with the
+launch command (§4) into the session hash that decides restarts. `enabled` and `idle_stop` are not in
 the hash: they decide whether a session runs, not how.
 
 Verified by: `tests/test_config.py::ValidPersona::test_hash_changes_with_shape_not_with_enabled`.
@@ -148,8 +151,9 @@ models:                         # required: one model for every tier
   strong: <model>
   frontier: <model>
 session:
-  command: [<arg>, …]           # required; placeholders below
-  env: {<NAME>: <value>, …}     # extra environment for every session
+  command: [<arg>, …]           # required; placeholders below; argv[0] has no "="
+  pass_env: [<NAME>, …]         # variables copied from the supervisor's environment
+  env: {<NAME>: <value>, …}     # literal variables for every session
 tmux_socket: <name>             # default pessoa; [A-Za-z0-9_-]{1,64}
 ```
 
@@ -169,10 +173,18 @@ Verified by: `tests/test_runtime.py::RuntimeConfig`.
 
 ### 3.2 No API key
 
-Sessions run on the signed-in subscription. An `ANTHROPIC_API_KEY` in the
-environment outranks that sign-in, so sessions would bill the key instead.
-`relayer reconcile` refuses to act (exit 2) while the variable is set and
-non-empty, before touching any session, and `session.env` may not set it.
+Sessions run on the signed-in subscription. These variables move a Claude
+Code session off it: `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` outrank
+the sign-in, and `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` route
+to a cloud account. `relayer reconcile` refuses to act (exit 2) while any is
+set and non-empty in its environment, before touching any session, and
+neither `session.env` nor `session.pass_env` may name one. Sessions inherit
+nothing else either (§4.2), so a variable reaches a session only if this
+file lists it.
+
+Values in `env` and `pass_env` appear in the session's command line, which
+other processes of the same user can read, as they can its environment. Do
+not put secrets there.
 
 Verified by: `tests/test_runtime.py::ApiKeyGuard`,
 `tests/test_runtime.py::RuntimeConfig::test_api_key_in_session_env`.
@@ -186,14 +198,37 @@ the runtime's tmux socket, and acts:
 |---|---|---|
 | running | absent from `personas.yaml` | stop |
 | running | disabled | stop |
-| running, hash differs or missing | enabled | restart |
+| running, session hash differs or missing | enabled | restart |
 | not running | enabled | start |
 
 Stops run first, then restarts, then starts, each group in name order. One
 failed action is reported and does not stop the others. Before a start, the
 persona's first folder is created if missing. The runtime only manages
-sessions on its own tmux socket. Each session carries its configuration
-hash (§1.4) in the tmux user option `@relayer_hash`.
+sessions on its own tmux socket.
 
-Verified by: `tests/test_reconcile.py`, `tests/test_tmux.py` (real tmux,
-skipped where it is not installed).
+The **session hash** covers the persona hash (§1.4) and the full launch
+command, environment included, so editing `relayer.yaml` (a model mapping,
+the command, `env`) restarts the sessions it affects. Each session carries
+its hash in the tmux user option `@relayer_hash`.
+
+Verified by: `tests/test_reconcile.py`, `tests/test_runtime.py`
+(`test_session_hash_tracks_runtime_changes`), `tests/test_tmux.py` (real
+tmux; CI installs it).
+
+### 4.2 Session isolation
+
+- The session command is one shell-quoted string,
+  `env -i <NAME=value …> <argv …>`. A session's environment is exactly
+  `HOME`, `PATH` and `LANG` from the supervisor, `TERM=screen-256color`,
+  `pass_env`, then `env`; it inherits nothing from the tmux server or
+  whichever process started it.
+- tmux runs with `-f /dev/null` (no user config) and a minimal environment.
+- The start directory has `#` doubled, as a second guard behind §1.1's
+  character set.
+- A command ending in `;`, an unsafe session name or a non-hex hash is
+  refused.
+
+Verified by: `tests/test_tmux.py` (`test_session_inherits_nothing`,
+`test_hash_in_workdir_is_literal`,
+`test_trailing_semicolon_argument_cannot_chain`), `tests/test_config.py`
+(`test_folder_characters_tmux_would_interpret`).

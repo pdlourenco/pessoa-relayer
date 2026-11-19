@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 from .config import Persona
 from .runtime import Runtime
@@ -30,7 +30,9 @@ class Action:
 _ORDER = {"stop": 0, "restart": 1, "start": 2}
 
 
-def plan(desired: dict[str, Persona], running: dict[str, Running]) -> list[Action]:
+def plan(desired: dict[str, Persona], running: dict[str, Running],
+         session_hash: Callable[[Persona], str]) -> list[Action]:
+    """``session_hash`` gives the hash a correctly configured session carries."""
     actions = []
     for name, session in running.items():
         persona = desired.get(name)
@@ -38,7 +40,7 @@ def plan(desired: dict[str, Persona], running: dict[str, Running]) -> list[Actio
             actions.append(Action("stop", name, "not in personas.yaml"))
         elif not persona.enabled:
             actions.append(Action("stop", name, "disabled"))
-        elif session.config_hash != persona.config_hash():
+        elif session.config_hash != session_hash(persona):
             actions.append(Action("restart", name, "configuration changed"))
     for name, persona in desired.items():
         if persona.enabled and name not in running:
@@ -48,7 +50,7 @@ def plan(desired: dict[str, Persona], running: dict[str, Running]) -> list[Actio
 
 
 def apply(actions: list[Action], desired: dict[str, Persona], backend: Backend,
-          runtime: Runtime) -> list[str]:
+          runtime: Runtime, environ: dict[str, str]) -> list[str]:
     """Carry out ``actions``; returns one error line per action that failed.
 
     A failing action does not stop the others: one broken persona must not
@@ -63,8 +65,8 @@ def apply(actions: list[Action], desired: dict[str, Persona], backend: Backend,
                 persona = desired[action.name]
                 workdir = persona.folders[0]
                 os.makedirs(workdir, exist_ok=True)
-                backend.start(action.name, runtime.session_argv(persona), workdir,
-                              runtime.env, persona.config_hash())
+                backend.start(action.name, runtime.session_command(persona, environ),
+                              workdir, runtime.session_hash(persona, environ))
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             errors.append(f"{action}: failed: {exc}")
     return errors
