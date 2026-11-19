@@ -32,9 +32,9 @@ SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9._@+/-]*$")
 DURATION_RE = re.compile(r"^([1-9][0-9]*)([mhd])$")
 DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400}
 
-HETERONYM_KEYS = {"template", "tier", "channel", "folders", "permissions",
-                "idle_stop", "enabled"}
-TEMPLATE_KEYS = {"version", "description", "max_tier", "default_tier",
+HETERONYM_KEYS = {"class", "template", "tier", "channel", "folders",
+                  "permissions", "idle_stop", "enabled"}
+TEMPLATE_KEYS = {"version", "description", "classes", "max_tier", "default_tier",
                  "folders", "permissions", "channel_kinds", "idle_stop",
                  "chat_creatable"}
 CHANNEL_KEYS = {"kind", "chat"}
@@ -53,6 +53,7 @@ class ConfigError(Exception):
 class Template:
     name: str
     description: str
+    classes: tuple[str, ...]        # trust classes whose heteronyms may use it
     max_tier: str
     default_tier: str
     folders: tuple[str, ...]        # roots, unresolved ({work}, {name})
@@ -74,6 +75,7 @@ class Heteronym:
     """A heteronym with template defaults applied and placeholders resolved."""
 
     name: str
+    klass: str                      # trust class ("class" in the file)
     template: str
     tier: str
     channel: Channel | None
@@ -91,6 +93,7 @@ class Heteronym:
         runs, not how it is configured.
         """
         shape = {
+            "class": self.klass,
             "template": self.template,
             "tier": self.tier,
             "channel": None if self.channel is None else
@@ -217,6 +220,13 @@ def load_template(path: Path) -> Template:
     if not NAME_RE.match(name):
         errors.append(f"{where}: directory name must match {NAME_RE.pattern}")
 
+    classes = _str_list(data.get("classes"), f"{where}.classes", errors)
+    if "classes" in data and not classes and isinstance(data.get("classes"), list):
+        errors.append(f"{where}.classes: must name at least one trust class")
+    for cls in classes:
+        if not NAME_RE.match(cls):
+            errors.append(f"{where}.classes: {cls!r} must match {NAME_RE.pattern}")
+
     max_tier = _tier(data.get("max_tier"), f"{where}.max_tier", errors)
     default_tier = _tier(data.get("default_tier"), f"{where}.default_tier", errors)
     if max_tier and default_tier and rank(default_tier) > rank(max_tier):
@@ -260,7 +270,8 @@ def load_template(path: Path) -> Template:
 
     if errors:
         raise ConfigError(errors)
-    return Template(name=name, description=description, max_tier=max_tier,
+    return Template(name=name, description=description, classes=classes,
+                    max_tier=max_tier,
                     default_tier=default_tier, folders=folders, allow=allow,
                     deny=deny, channel_kinds=kinds, idle_stop=idle_stop,
                     chat_creatable=chat_creatable)
@@ -283,7 +294,7 @@ def load_templates(directory: Path) -> dict[str, Template]:
 # --- heteronyms -------------------------------------------------------------------
 
 def _heteronym(name: str, data: Any, templates: dict[str, Template],
-             work_root: str, errors: list[str]) -> Heteronym | None:
+               work_root: str, errors: list[str]) -> Heteronym | None:
     where = f"heteronyms.{name}"
     start = len(errors)
     if not isinstance(name, str) or not NAME_RE.match(name):
@@ -294,11 +305,19 @@ def _heteronym(name: str, data: Any, templates: dict[str, Template],
         return None
     _unknown_keys(data, HETERONYM_KEYS, where, errors)
 
+    klass = data.get("class")
+    if not isinstance(klass, str) or not NAME_RE.match(klass):
+        errors.append(f"{where}.class: required; must match {NAME_RE.pattern}")
+        return None
+
     tpl_name = data.get("template")
     tpl = templates.get(tpl_name) if isinstance(tpl_name, str) else None
     if tpl is None:
         errors.append(f"{where}.template: unknown template {data.get('template')!r}")
         return None
+    if klass not in tpl.classes:
+        errors.append(f"{where}.class: template {tpl.name!r} is not for class "
+                      f"{klass!r} (it allows {list(tpl.classes)})")
 
     tier = _tier(data.get("tier", tpl.default_tier), f"{where}.tier", errors)
     if tier and rank(tier) > rank(tpl.max_tier):
@@ -364,13 +383,15 @@ def _heteronym(name: str, data: Any, templates: dict[str, Template],
 
     if len(errors) > start:
         return None
-    return Heteronym(name=name, template=tpl.name, tier=tier, channel=channel,
-                   folders=tuple(folders), allow=tuple(allow), deny=tpl.deny,
-                   idle_stop=idle_stop, enabled=enabled)
+    return Heteronym(name=name, klass=klass, template=tpl.name, tier=tier,
+                     channel=channel, folders=tuple(folders), allow=tuple(allow),
+                     deny=tpl.deny, idle_stop=idle_stop, enabled=enabled)
 
 
 def _overlaps(heteronyms: dict[str, Heteronym]) -> list[str]:
-    """No shared or nested folders, no shared chat (docs/SPEC.md §1.3)."""
+    """No shared or nested folders within a class, no shared chat at all
+    (docs/SPEC.md §1.3). Classes run in separate containers with separate
+    work roots, so folders only clash inside one class."""
     errors = []
     items = sorted(heteronyms.items())
     chats: dict[tuple[str, str], str] = {}
@@ -385,6 +406,8 @@ def _overlaps(heteronyms: dict[str, Heteronym]) -> list[str]:
             chats[key] = name
     for i, (a_name, a) in enumerate(items):
         for b_name, b in items[i + 1:]:
+            if a.klass != b.klass:
+                continue
             for fa in a.folders:
                 for fb in b.folders:
                     if _within(fa, fb) or _within(fb, fa):
@@ -394,8 +417,14 @@ def _overlaps(heteronyms: dict[str, Heteronym]) -> list[str]:
 
 
 def load_heteronyms(path: Path, templates: dict[str, Template],
-                  work_root: str = "/work") -> dict[str, Heteronym]:
-    """Load and validate ``heteronyms.yaml``; raises ConfigError on any error."""
+                    work_root: str = "/work",
+                    klass: str | None = None) -> dict[str, Heteronym]:
+    """Load and validate ``heteronyms.yaml``; raises ConfigError on any error.
+
+    With ``klass``, only that trust class's entries are validated and
+    returned (docs/SPEC.md §1.5): each container runs one class, and an
+    error in another class's entry is that container's to report.
+    """
     data = _load_yaml(path)
     errors: list[str] = []
     if not isinstance(data, dict):
@@ -418,6 +447,9 @@ def load_heteronyms(path: Path, templates: dict[str, Template],
 
     heteronyms: dict[str, Heteronym] = {}
     for name, entry in entries.items():
+        if (klass is not None and isinstance(entry, dict)
+                and isinstance(entry.get("class"), str) and entry["class"] != klass):
+            continue
         heteronym = _heteronym(name, entry, templates, work_root, errors)
         if heteronym is not None:
             heteronyms[name] = heteronym

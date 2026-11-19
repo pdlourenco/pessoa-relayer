@@ -2,8 +2,9 @@
 
 A runtime that keeps several long-lived agent **heteronyms** running on one
 host, each in its own session, and relays messages to them over chat
-channels. The name comes from Fernando Pessoa's heteronyms (one writer, many
-distinct voices) and from a relayer that passes messages along.
+channels. A heteronym is Fernando Pessoa's word for each of the distinct
+writers he invented and wrote as; here it is one agent with its own role,
+tools, folders and memory. The relayer passes messages along.
 
 ## Where it fits
 
@@ -28,11 +29,23 @@ seed version it targets.
 - **Nothing host-specific.** Hosts, paths, user IDs, ports and network
   settings are configuration. The repository ships examples, never one
   machine's values.
-- **Heteronyms are config.** A `heteronyms.yaml` file is the source of truth for
-  which sessions run. The supervisor reconciles running sessions against it,
-  so creating, changing or removing a heteronym is an edit with git history.
+- **Heteronyms are config, kept elsewhere.** A `heteronyms.yaml` file is the
+  source of truth for which sessions run. It lives in the deployment's own
+  private definitions repository, mounted read-only at a configured path;
+  this repository ships only examples. The supervisor reconciles running
+  sessions against it, so creating, changing or removing a heteronym is an
+  edit with git history.
 - **Templates cap permissions.** A heteronym can never get broader tools or
-  folders than its template allows.
+  folders than its template allows. Memory grants nothing: permissions come
+  only from definitions.
+- **Isolation by operating-system user.** Each heteronym's session runs as
+  its own Unix user, and its folders belong to that user alone.
+- **One container per trust class.** Heteronyms with the same tools and
+  credentials share a container; each container runs only its own class.
+  No heteronym ever creates a container.
+- **No private content here.** This repository is public. Host names, paths,
+  the layout of any one deployment, and anything from the private
+  repositories stay out of it.
 
 ## Status
 

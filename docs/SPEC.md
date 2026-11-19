@@ -6,10 +6,13 @@ changes, this file changes first, in the same PR as the code.
 
 ## 1. `heteronyms.yaml`
 
-The source of truth for which heteronym sessions run. One file per deployment;
-`examples/heteronyms.yaml` is a starting point. It lives outside this
-repository's tree in a real deployment, because it holds that deployment's
-chat identifiers.
+The source of truth for which heteronym sessions run. One file per
+deployment; `examples/heteronyms.yaml` is a starting point. In a deployment
+it lives, with the templates, in a private definitions repository mounted
+read-only at a configured path (`--heteronyms`, `--templates`); the runtime
+never reads the copies in this repository. Heteronyms can read their
+definitions and never write them, because definitions decide what each may
+do.
 
 ### 1.1 Shape
 
@@ -17,6 +20,7 @@ chat identifiers.
 version: 1
 heteronyms:
   <name>:
+    class: <trust class>           # required (§1.5)
     template: <template name>      # required
     tier: <tier>                   # default: the template's default_tier
     channel:                       # optional; omit for no chat channel
@@ -54,10 +58,15 @@ Verified by: `tests/test_config.py::ValidHeteronym`.
 
 ### 1.3 Isolation
 
-No two heteronyms may share a folder, and no heteronym's folder may sit inside
-another's. Heteronyms exchange work through the forge or notes, never through
-shared folders. No two heteronyms may use the same channel `kind` and `chat`,
-since both sessions would answer every message there.
+Within one trust class, no two heteronyms may share a folder, and no
+heteronym's folder may sit inside another's. (Classes run in separate
+containers with separate work roots.) Heteronyms exchange work through the
+forge or notes, never through shared folders. No two heteronyms, in any
+class, may use the same channel `kind` and `chat`, since both sessions would
+answer every message there. A container loading only its own class cannot
+see the others, so this cross-class check runs when the whole file is
+validated (`relayer validate` with no `--class`), for example in the
+definitions repository's own CI.
 
 Paths are compared after collapsing repeated leading slashes (`//work` is
 `/work`). No folder may resolve to `/`, and the work root must be an
@@ -70,12 +79,29 @@ Verified by: `tests/test_config.py::Rejections` (`test_overlapping_heteronyms`,
 
 ### 1.4 Configuration hash
 
-Each heteronym has a hash of its own settings: template, tier, channel,
+Each heteronym has a hash of its own settings: class, template, tier,
+channel,
 resolved folders, allow and deny lists. The reconciler combines it with the
 launch command (§4) into the session hash that decides restarts. `enabled` and `idle_stop` are not in
 the hash: they decide whether a session runs, not how.
 
 Verified by: `tests/test_config.py::ValidHeteronym::test_hash_changes_with_shape_not_with_enabled`.
+
+### 1.5 Trust classes
+
+Heteronyms with the same tools and credentials form a **trust class**, and
+each class runs in its own container from the same image. A container loads
+only its class (`--class` or `RELAYER_CLASS`; the runtime config's `class`
+once it exists). Entries of other classes are skipped without being
+validated: their errors belong to the container that runs them.
+
+A heteronym's template must list its class in `classes` (§2), so a template
+with forge write access cannot be used in a class that has none. New classes
+are made by the owner, by hand: no heteronym creates a container, and a
+heteronym created from chat is created only in the requester's own class.
+
+Verified by: `tests/test_config.py::TrustClass`,
+`tests/test_config.py::Rejections::test_template_not_for_this_class`.
 
 ## 2. Templates: `templates/<name>/template.yaml`
 
@@ -88,6 +114,7 @@ into a new heteronym's folder (CLAUDE.md, settings).
 ```yaml
 version: 1                      # required
 description: <one line>         # default ""
+classes: [<trust class>, …]     # required, non-empty (§1.5)
 max_tier: <tier>                # required
 default_tier: <tier>            # required; not above max_tier
 folders: [<folder pattern>, …]  # required, non-empty; roots heteronym folders sit within

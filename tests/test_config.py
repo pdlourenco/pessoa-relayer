@@ -4,6 +4,7 @@ Every rejection rule has a case that shows it failing; the shipped examples
 have a case that shows them passing.
 """
 
+import dataclasses
 import tempfile
 import textwrap
 import unittest
@@ -16,6 +17,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 ASSISTANT = """\
 version: 1
+classes: [assistants]
 max_tier: strong
 default_tier: standard
 folders: ["{work}/{name}"]
@@ -63,7 +65,7 @@ class ShippedExamples(unittest.TestCase):
 
 class ValidHeteronym(unittest.TestCase):
     def test_defaults_come_from_template(self):
-        ws = Workspace(heteronym_file("pa:\n  template: assistant\n"))
+        ws = Workspace(heteronym_file("pa:\n  class: assistants\n  template: assistant\n"))
         self.addCleanup(ws.close)
         p = ws.load()["pa"]
         self.assertEqual(p.tier, "standard")
@@ -76,6 +78,7 @@ class ValidHeteronym(unittest.TestCase):
     def test_narrower_permissions_and_subfolder_allowed(self):
         ws = Workspace(heteronym_file("""\
             pa:
+              class: assistants
               template: assistant
               tier: fast
               permissions: [Read]
@@ -91,7 +94,7 @@ class ValidHeteronym(unittest.TestCase):
         self.assertIsNone(p.idle_stop)
 
     def _hash(self, entry: str, templates=None) -> str:
-        ws = Workspace(heteronym_file(f"pa: {{template: assistant{entry}}}\n"), templates)
+        ws = Workspace(heteronym_file(f"pa: {{class: assistants, template: assistant{entry}}}\n"), templates)
         self.addCleanup(ws.close)
         return ws.load()["pa"].config_hash()
 
@@ -127,144 +130,144 @@ class Rejections(unittest.TestCase):
         self.assertIn(expected, joined)
 
     def test_tier_above_template_cap(self):
-        self.assertRejected(heteronym_file("pa: {template: assistant, tier: frontier}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant, tier: frontier}\n"),
                             "exceeds template 'assistant' max_tier 'strong'")
 
     def test_unknown_tier(self):
-        self.assertRejected(heteronym_file("pa: {template: assistant, tier: opus}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant, tier: opus}\n"),
                             "'opus' is not one of")
 
     def test_permission_not_in_template(self):
-        self.assertRejected(heteronym_file("pa: {template: assistant, permissions: [Bash]}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant, permissions: [Bash]}\n"),
                             "'Bash' is not in template 'assistant' allow list")
 
     def test_folder_outside_template_root(self):
-        self.assertRejected(heteronym_file('pa: {template: assistant, folders: ["{work}/other"]}\n'),
+        self.assertRejected(heteronym_file('pa: {class: assistants, template: assistant, folders: ["{work}/other"]}\n'),
                             "is outside template 'assistant' roots")
 
     def test_folder_escape_with_dotdot(self):
         self.assertRejected(
-            heteronym_file('pa: {template: assistant, folders: ["{work}/pa/../other"]}\n'),
+            heteronym_file('pa: {class: assistants, template: assistant, folders: ["{work}/pa/../other"]}\n'),
             "'/work/other' is outside template")
 
     def test_relative_folder(self):
-        self.assertRejected(heteronym_file('pa: {template: assistant, folders: ["pa"]}\n'),
+        self.assertRejected(heteronym_file('pa: {class: assistants, template: assistant, folders: ["pa"]}\n'),
                             "is not absolute")
 
     def test_unknown_placeholder(self):
-        self.assertRejected(heteronym_file('pa: {template: assistant, folders: ["{home}/pa"]}\n'),
+        self.assertRejected(heteronym_file('pa: {class: assistants, template: assistant, folders: ["{home}/pa"]}\n'),
                             "unknown placeholder {home}")
 
     def test_overlapping_heteronyms(self):
         templates = {"assistant": ASSISTANT.replace('["{work}/{name}"]', '["{work}"]')}
         self.assertRejected(heteronym_file("""\
-            pa: {template: assistant, folders: ["{work}/shared"]}
-            pb: {template: assistant, folders: ["{work}/shared/sub"]}
+            pa: {class: assistants, template: assistant, folders: ["{work}/shared"]}
+            pb: {class: assistants, template: assistant, folders: ["{work}/shared/sub"]}
             """), "overlaps heteronyms.pb folder", templates)
 
     def test_unknown_heteronym_key(self):
-        self.assertRejected(heteronym_file("pa: {template: assistant, permision: [Read]}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant, permision: [Read]}\n"),
                             "heteronyms.pa.permision: unknown key")
 
     def test_unknown_template(self):
-        self.assertRejected(heteronym_file("pa: {template: nope}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: nope}\n"),
                             "unknown template 'nope'")
 
     def test_bad_name(self):
-        self.assertRejected(heteronym_file("Bad_Name: {template: assistant}\n"),
+        self.assertRejected(heteronym_file("Bad_Name: {class: assistants, template: assistant}\n"),
                             "name must match")
 
     def test_duplicate_heteronym_key(self):
         self.assertRejected(heteronym_file("""\
-            pa: {template: assistant}
-            pa: {template: assistant, tier: fast}
+            pa: {class: assistants, template: assistant}
+            pa: {class: assistants, template: assistant, tier: fast}
             """), "duplicate key 'pa'")
 
     def test_channel_kind_not_allowed(self):
         self.assertRejected(
-            heteronym_file("pa: {template: assistant, channel: {kind: telegram, chat: x}}\n"),
+            heteronym_file("pa: {class: assistants, template: assistant, channel: {kind: telegram, chat: x}}\n"),
             "'telegram' not allowed by template 'assistant'")
 
     def test_channel_without_chat(self):
-        self.assertRejected(heteronym_file("pa: {template: assistant, channel: {kind: signal}}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant, channel: {kind: signal}}\n"),
                             "channel.chat: must be a non-empty string")
 
     def test_bad_idle_stop(self):
-        self.assertRejected(heteronym_file("pa: {template: assistant, idle_stop: 90}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant, idle_stop: 90}\n"),
                             "is not a duration")
 
     def test_wrong_version(self):
         self.assertRejected("version: 2\nheteronyms: {}\n", "version must be 1")
 
     def test_relative_work_root(self):
-        self.assertRejected(heteronym_file("pa: {template: assistant}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant}\n"),
                             "must be an absolute, normalised path", work_root="work")
 
     def test_template_default_above_max(self):
         bad = ASSISTANT.replace("default_tier: standard", "default_tier: frontier")
-        self.assertRejected(heteronym_file("pa: {template: assistant}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant}\n"),
                             "default_tier: 'frontier' exceeds max_tier 'strong'",
                             {"assistant": bad})
 
     def test_template_unknown_key(self):
         bad = ASSISTANT + "max_teir: fast\n"
-        self.assertRejected(heteronym_file("pa: {template: assistant}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant}\n"),
                             "template assistant.max_teir: unknown key",
                             {"assistant": bad})
 
     def test_sibling_prefix_is_not_inside_root(self):
         # /work/pax shares a string prefix with root /work/pa but is not in it.
-        self.assertRejected(heteronym_file('pa: {template: assistant, folders: ["{work}/{name}x"]}\n'),
+        self.assertRejected(heteronym_file('pa: {class: assistants, template: assistant, folders: ["{work}/{name}x"]}\n'),
                             "'/work/pax' is outside template")
 
     def test_same_folder_twice(self):
         templates = {"assistant": ASSISTANT.replace('["{work}/{name}"]', '["{work}"]')}
         self.assertRejected(heteronym_file("""\
-            pa: {template: assistant, folders: ["{work}/shared"]}
-            pb: {template: assistant, folders: ["{work}/shared"]}
+            pa: {class: assistants, template: assistant, folders: ["{work}/shared"]}
+            pb: {class: assistants, template: assistant, folders: ["{work}/shared"]}
             """), "overlaps heteronyms.pb folder", templates)
 
     def test_nesting_in_the_other_direction(self):
         templates = {"assistant": ASSISTANT.replace('["{work}/{name}"]', '["{work}"]')}
         self.assertRejected(heteronym_file("""\
-            pa: {template: assistant, folders: ["{work}/shared/sub"]}
-            pb: {template: assistant, folders: ["{work}/shared"]}
+            pa: {class: assistants, template: assistant, folders: ["{work}/shared/sub"]}
+            pb: {class: assistants, template: assistant, folders: ["{work}/shared"]}
             """), "overlaps heteronyms.pb folder", templates)
 
     def test_double_slash_cannot_dodge_isolation(self):
         templates = {"assistant": ASSISTANT.replace('["{work}/{name}"]', '["{work}"]')}
         self.assertRejected(heteronym_file("""\
-            pa: {template: assistant, folders: ["/work/x"]}
-            pb: {template: assistant, folders: ["//work/x"]}
+            pa: {class: assistants, template: assistant, folders: ["/work/x"]}
+            pb: {class: assistants, template: assistant, folders: ["//work/x"]}
             """), "overlaps heteronyms.pb folder", templates)
 
     def test_template_root_slash(self):
         bad = ASSISTANT.replace('["{work}/{name}"]', '["/"]')
-        self.assertRejected(heteronym_file("pa: {template: assistant}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant}\n"),
                             "resolves to /", {"assistant": bad})
 
     def test_work_root_slash_and_braces(self):
         for root in ("/", "//work", "/w{name}"):
             with self.subTest(root=root):
-                self.assertRejected(heteronym_file("pa: {template: assistant}\n"),
+                self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant}\n"),
                                     "work root", work_root=root)
 
     def test_shared_chat(self):
         self.assertRejected(heteronym_file("""\
-            pa: {template: assistant, channel: {kind: signal, chat: g1}}
-            pb: {template: assistant, channel: {kind: signal, chat: g1}}
+            pa: {class: assistants, template: assistant, channel: {kind: signal, chat: g1}}
+            pb: {class: assistants, template: assistant, channel: {kind: signal, chat: g1}}
             """), "is already used by heteronyms.pa")
 
     def test_blank_chat(self):
-        self.assertRejected(heteronym_file("pa: {template: assistant, channel: {kind: signal, chat: ' '}}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant, channel: {kind: signal, chat: ' '}}\n"),
                             "channel.chat: must be a non-empty string")
 
     def test_padded_chat(self):
-        self.assertRejected(heteronym_file("pa: {template: assistant, channel: {kind: signal, chat: ' g'}}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant, channel: {kind: signal, chat: ' g'}}\n"),
                             "no leading or trailing spaces")
 
     def test_empty_folders(self):
-        self.assertRejected(heteronym_file("pa: {template: assistant, folders: []}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant, folders: []}\n"),
                             "must name at least one folder")
 
     def test_heteronyms_not_a_mapping(self):
@@ -278,7 +281,7 @@ class Rejections(unittest.TestCase):
 
     def test_malformed_inputs_raise_config_error(self):
         cases = {
-            "template is a list": heteronym_file("pa: {template: [assistant]}\n"),
+            "template is a list": heteronym_file("pa: {class: assistants, template: [assistant]}\n"),
             "non-scalar key": "version: 1\nheteronyms:\n  ? [a]\n  : 1\n",
         }
         for label, body in cases.items():
@@ -286,7 +289,7 @@ class Rejections(unittest.TestCase):
                 self.assertRejected(body, "")
 
     def test_invalid_utf8_and_directory(self):
-        ws = Workspace(heteronym_file("pa: {template: assistant}\n"))
+        ws = Workspace(heteronym_file("pa: {class: assistants, template: assistant}\n"))
         self.addCleanup(ws.close)
         ws.heteronyms.write_bytes(b"version: 1\n\xff\n")
         with self.assertRaises(ConfigError):
@@ -301,17 +304,30 @@ class Rejections(unittest.TestCase):
                        "{work}/{name}/a\\nb"):
             with self.subTest(folder=folder):
                 self.assertRejected(
-                    heteronym_file(f"pa: {{template: assistant, folders: [\"{folder}\"]}}\n"),
+                    heteronym_file(f"pa: {{class: assistants, template: assistant, folders: [\"{folder}\"]}}\n"),
                     "has characters outside")
 
     def test_work_root_unsafe_characters(self):
-        self.assertRejected(heteronym_file("pa: {template: assistant}\n"),
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant}\n"),
                             "work root", work_root="/w#x")
+
+    def test_class_required(self):
+        self.assertRejected(heteronym_file("pa: {template: assistant}\n"),
+                            "heteronyms.pa.class: required")
+
+    def test_template_not_for_this_class(self):
+        self.assertRejected(heteronym_file("pa: {class: dev, template: assistant}\n"),
+                            "template 'assistant' is not for class 'dev'")
+
+    def test_template_needs_classes(self):
+        bad = ASSISTANT.replace("classes: [assistants]\n", "classes: []\n")
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant}\n"),
+                            "must name at least one trust class", {"assistant": bad})
 
     def test_all_errors_reported_together(self):
         ws = Workspace(heteronym_file("""\
-            pa: {template: assistant, tier: frontier}
-            pb: {template: assistant, permissions: [Bash]}
+            pa: {class: assistants, template: assistant, tier: frontier}
+            pb: {class: assistants, template: assistant, permissions: [Bash]}
             """))
         self.addCleanup(ws.close)
         with self.assertRaises(ConfigError) as exc:
@@ -330,6 +346,66 @@ class Helpers(unittest.TestCase):
 
     def test_resolve_folder_normalises(self):
         self.assertEqual(resolve_folder("{work}/{name}/", "/srv/w", "pa"), "/srv/w/pa")
+
+
+
+class TrustClass(unittest.TestCase):
+    TEMPLATES = {"assistant": ASSISTANT.replace("classes: [assistants]", "classes: [assistants, ops]")}
+
+    def ws(self, body):
+        ws = Workspace(heteronym_file(body), self.TEMPLATES)
+        self.addCleanup(ws.close)
+        return ws
+
+    def load(self, ws, klass):
+        templates = load_templates(ws.root / "templates")
+        return load_heteronyms(ws.heteronyms, templates, "/work", klass)
+
+    def test_filter_returns_only_that_class(self):
+        ws = self.ws("""\
+            pa: {class: assistants, template: assistant}
+            op: {class: ops, template: assistant}
+            """)
+        self.assertEqual(set(self.load(ws, "assistants")), {"pa"})
+        self.assertEqual(set(self.load(ws, "ops")), {"op"})
+        self.assertEqual(set(self.load(ws, None)), {"pa", "op"})
+
+    def test_other_class_errors_do_not_block_this_class(self):
+        ws = self.ws("""\
+            pa: {class: assistants, template: assistant}
+            op: {class: ops, template: assistant, tier: frontier}
+            """)
+        self.assertEqual(set(self.load(ws, "assistants")), {"pa"})
+        with self.assertRaises(ConfigError):
+            self.load(ws, "ops")
+
+    def test_same_folder_in_different_classes_is_fine(self):
+        templates = {"assistant": self.TEMPLATES["assistant"].replace('["{work}/{name}"]', '["{work}"]')}
+        ws = Workspace(heteronym_file("""\
+            pa: {class: assistants, template: assistant, folders: ["{work}/x"]}
+            op: {class: ops, template: assistant, folders: ["{work}/x"]}
+            """), templates)
+        self.addCleanup(ws.close)
+        self.assertEqual(len(self.load(ws, None)), 2)
+
+    def test_shared_chat_across_classes_is_rejected(self):
+        ws = self.ws("""\
+            pa: {class: assistants, template: assistant, channel: {kind: signal, chat: g}}
+            op: {class: ops, template: assistant, channel: {kind: signal, chat: g}}
+            """)
+        with self.assertRaises(ConfigError) as exc:
+            self.load(ws, None)
+        self.assertIn("is already used by", "\n".join(exc.exception.errors))
+
+    def test_class_changes_the_hash(self):
+        ws = self.ws("""\
+            pa: {class: assistants, template: assistant}
+            pb: {class: ops, template: assistant}
+            """)
+        hs = self.load(ws, None)
+        a = dataclasses.replace(hs["pa"], klass="ops")
+        self.assertNotEqual(hs["pa"].config_hash(), a.config_hash())
+
 
 
 if __name__ == "__main__":

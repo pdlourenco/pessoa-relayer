@@ -4,7 +4,7 @@ from relayer.config import Channel, Heteronym
 
 
 def heteronym(name="pa", tier="standard", enabled=True, folder=None, allow=("Read",)):
-    return Heteronym(name=name, template="assistant", tier=tier,
+    return Heteronym(name=name, klass="assistants", template="assistant", tier=tier,
                    channel=Channel("signal", f"group.{name}"),
                    folders=(folder or f"/work/{name}",), allow=tuple(allow),
                    deny=("Edit(./.claude/**)",), idle_stop=None, enabled=enabled)
