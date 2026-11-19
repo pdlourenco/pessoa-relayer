@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -47,6 +48,13 @@ class TmuxBackend:
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         proc = subprocess.run([*self._base, *args], capture_output=True, text=True,
                               env=self._env)
+        if proc.returncode != 0 and "server exited unexpectedly" in proc.stderr:
+            # The server was shutting down (its last session had just ended)
+            # when we connected. Once it is gone the next call starts a new
+            # one, so retry once.
+            time.sleep(0.2)
+            proc = subprocess.run([*self._base, *args], capture_output=True, text=True,
+                                  env=self._env)
         if check and proc.returncode != 0:
             raise SessionError(f"tmux {' '.join(args[:2])}: {proc.stderr.strip()}")
         return proc

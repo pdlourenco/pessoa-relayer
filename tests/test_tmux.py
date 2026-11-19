@@ -4,6 +4,7 @@ Skipped where tmux is not installed (CI installs it). Sessions run a short
 shell command, not an agent, so the test needs no sign-in and no network.
 """
 
+import itertools
 import os
 import shlex
 import shutil
@@ -26,10 +27,15 @@ def wait_for(path: Path, timeout=5.0) -> str:
     raise AssertionError(f"{path} not written")
 
 
+_sockets = itertools.count()
+
+
 @unittest.skipUnless(shutil.which("tmux"), "tmux not installed")
 class Tmux(unittest.TestCase):
     def setUp(self):
-        self.socket = f"relayer-test-{os.getpid()}"
+        # A fresh socket per test: kill-server returns before the old server
+        # has gone, so reusing a name races the previous test's cleanup.
+        self.socket = f"relayer-test-{os.getpid()}-{next(_sockets)}"
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
@@ -113,6 +119,26 @@ class Tmux(unittest.TestCase):
     def test_refuses_unsafe_name(self):
         with self.assertRaises(SessionError):
             self.backend.start("pa;x", self.sleeper(), self.tmp.name, "aa")
+
+
+
+class Retry(unittest.TestCase):
+    def test_retries_once_when_server_is_exiting(self):
+        from unittest import mock
+        exiting = subprocess.CompletedProcess([], 1, "", "server exited unexpectedly\n")
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch("relayer.sessions.subprocess.run", side_effect=[exiting, ok]) as run, \
+                mock.patch("relayer.sessions.time.sleep"):
+            TmuxBackend("s").stop("pa")
+        self.assertEqual(run.call_count, 2)
+
+    def test_other_errors_are_not_retried(self):
+        from unittest import mock
+        bad = subprocess.CompletedProcess([], 1, "", "can't find session: pa\n")
+        with mock.patch("relayer.sessions.subprocess.run", return_value=bad) as run:
+            with self.assertRaises(SessionError):
+                TmuxBackend("s").stop("pa")
+        self.assertEqual(run.call_count, 1)
 
 
 if __name__ == "__main__":
