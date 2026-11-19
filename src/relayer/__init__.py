@@ -1,3 +1,3 @@
-"""pessoa-relayer: run long-lived agent personas from config."""
+"""pessoa-relayer: run long-lived agent heteronyms from config."""
 
 __version__ = "0.0.1"

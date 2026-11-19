@@ -7,14 +7,14 @@ import os
 import sys
 from pathlib import Path
 
-from .config import ConfigError, load_personas, load_templates
+from .config import ConfigError, load_heteronyms, load_templates
 
 
 def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--personas", type=Path,
-        default=Path(os.environ.get("RELAYER_PERSONAS", "personas.yaml")),
-        help="personas file (env RELAYER_PERSONAS; default ./personas.yaml)")
+        "--heteronyms", type=Path,
+        default=Path(os.environ.get("RELAYER_HETERONYMS", "heteronyms.yaml")),
+        help="heteronyms file (env RELAYER_HETERONYMS; default ./heteronyms.yaml)")
     parser.add_argument(
         "--templates", type=Path,
         default=Path(os.environ.get("RELAYER_TEMPLATES", "templates")),
@@ -28,22 +28,22 @@ def _common(parser: argparse.ArgumentParser) -> None:
 def cmd_validate(args: argparse.Namespace) -> int:
     try:
         templates = load_templates(args.templates)
-        personas = load_personas(args.personas, templates, args.work_root)
+        heteronyms = load_heteronyms(args.heteronyms, templates, args.work_root)
     except ConfigError as exc:
         for line in exc.errors:
             print(f"error: {line}", file=sys.stderr)
         return 1
-    for name, p in sorted(personas.items()):
+    for name, p in sorted(heteronyms.items()):
         state = "enabled" if p.enabled else "disabled"
         print(f"{name}: template={p.template} tier={p.tier} {state}")
-    print(f"ok: {len(personas)} persona(s), {len(templates)} template(s)")
+    print(f"ok: {len(heteronyms)} heteronym(s), {len(templates)} template(s)")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="relayer")
     sub = parser.add_subparsers(dest="command", required=True)
-    validate = sub.add_parser("validate", help="check personas.yaml and templates")
+    validate = sub.add_parser("validate", help="check heteronyms.yaml and templates")
     _common(validate)
     validate.set_defaults(func=cmd_validate)
     args = parser.parse_args(argv)
