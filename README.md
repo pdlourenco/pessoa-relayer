@@ -41,9 +41,43 @@ Early. Planned components, each landing as its own small PR:
 1. `personas.yaml` and template format, with a validator (`relayer validate`)
 2. reconciler: running sessions against `personas.yaml` (`relayer reconcile`)
 3. session supervisor (`relayer supervise`, `relayer wake`)
-4. container image and an example compose file
+4. container image and an example compose file (see Deploy)
 
 Messaging channels (Telegram, then Signal) come after these.
+
+## Deploy
+
+Everything host-specific goes in `.env` and a config directory; the
+repository holds only examples.
+
+1. Copy `.env.example` to `.env`. Pin `CLAUDE_CODE_VERSION`, set the user
+   ids to the owner of your host directories, and fill in the four host
+   paths. Back up the Claude, work and state directories.
+2. Put `personas.yaml` and `relayer.yaml` in the config directory, starting
+   from `examples/`. Check them with `relayer validate`.
+3. Build, then sign in once, interactively, with your own subscription:
+
+   ```bash
+   docker compose -f compose.example.yaml build
+   ```
+
+   ```bash
+   docker compose -f compose.example.yaml run --rm relayer claude
+   ```
+
+   Complete the login, confirm `/status` shows your plan rather than an API
+   key, and exit. The sign-in lives in the Claude directory you mounted.
+4. Start the supervisor:
+
+   ```bash
+   docker compose -f compose.example.yaml up -d
+   ```
+
+Network settings (`network_mode`, `networks`) depend on the host: put them
+in a compose override file, not in the example. The container gets no
+Docker socket, no privileged mode and no extra capabilities. Updating Claude
+Code means changing `CLAUDE_CODE_VERSION` and rebuilding; the image turns
+off the updater so the version moves only then.
 
 ## Licence
 

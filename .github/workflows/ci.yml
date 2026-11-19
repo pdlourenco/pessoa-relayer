@@ -26,3 +26,12 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - name: shipped examples validate
         run: relayer validate --personas examples/personas.yaml --templates templates
+
+  image:
+    name: image smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # "stable" keeps CI green across releases; deployments pin an exact
+      # version in .env (README "Deploy").
+      - run: scripts/image-smoke.sh stable
