@@ -178,7 +178,7 @@ class UserTmuxBackend:
         # kill-session ends the tmux session, not a daemon the heteronym
         # started with setsid; end everything its uid runs (docs/SPEC.md §6.3).
         subprocess.run([*ident.as_user(), "kill", "-KILL", "-1"], capture_output=True)
-        deadline = time.time() + 2
+        deadline = time.time() + 5
         while processes_of(ident.uid) and time.time() < deadline:
             time.sleep(0.05)
         if processes_of(ident.uid):
