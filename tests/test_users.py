@@ -101,6 +101,23 @@ class BackendChoice(unittest.TestCase):
         self.assertNotIsInstance(backend, UserTmuxBackend)
 
 
+def remove_user(ident):
+    """Kill a test user's processes, wait until none is live, then delete it.
+    userdel refuses a user with a running process, and a stale user breaks
+    the next run's tests."""
+    from relayer.users import processes_of
+    deadline = time.time() + 5
+    while processes_of(ident.uid) and time.time() < deadline:
+        subprocess.run(["kill", "-9", *map(str, processes_of(ident.uid))], capture_output=True)
+        time.sleep(0.05)
+    for _ in range(20):
+        if subprocess.run(["userdel", ident.user], capture_output=True).returncode in (0, 6):
+            break                                  # 6: no such user
+        time.sleep(0.1)
+    subprocess.run(["groupdel", ident.user], capture_output=True)
+    shutil.rmtree(f"/tmp/tmux-{ident.uid}", ignore_errors=True)
+
+
 ROOT_TOOLS = os.geteuid() == 0 and all(shutil.which(t) for t in
                                         ("useradd", "groupadd", "setpriv", "tmux"))
 
@@ -122,11 +139,7 @@ class RealUsers(unittest.TestCase):
 
     def cleanup(self):
         for ident in self.accounts.known():
-            subprocess.run(["pkill", "-KILL", "-u", str(ident.uid)], capture_output=True)
-            time.sleep(0.1)
-            subprocess.run(["userdel", ident.user], capture_output=True)
-            subprocess.run(["groupdel", ident.user], capture_output=True)
-            shutil.rmtree(f"/tmp/tmux-{ident.uid}", ignore_errors=True)
+            remove_user(ident)
         shutil.rmtree(self.root, ignore_errors=True)
 
     def h(self, name, *folders):

@@ -178,11 +178,16 @@ class UserTmuxBackend:
             pass                          # already gone, or hidden: the kill below covers it
         # kill-session ends the tmux session, not a daemon the heteronym
         # started with setsid; end everything its uid runs (docs/SPEC.md §6.3).
-        # kill(-1) walks the process table once, so a process forking during
-        # the walk can leave a child it missed: repeat until none is left.
+        # Signal each live process of the uid by pid, as that user (root here
+        # has no CAP_KILL), and repeat: a process forking meanwhile can add a
+        # child the previous round did not see. procps kill takes "-9 PID…";
+        # it reads "-s KILL -- -1" as a usage error.
         deadline = time.time() + 5
-        while processes_of(ident.uid) and time.time() < deadline:
-            subprocess.run([*ident.as_user(), "kill", "-s", "KILL", "--", "-1"],
+        while time.time() < deadline:
+            pids = processes_of(ident.uid)
+            if not pids:
+                break
+            subprocess.run([*ident.as_user(), "kill", "-9", *map(str, pids)],
                            capture_output=True)
             time.sleep(0.1)
         left = processes_of(ident.uid)
