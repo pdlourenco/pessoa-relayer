@@ -25,6 +25,9 @@ from .tiers import TIERS, rank
 
 FORMAT_VERSION = 1
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+# A heteronym's name also names its Unix user, "h-<name>", which Linux caps
+# at 32 characters (docs/SPEC.md §6).
+HETERONYM_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,29}$")
 # Resolved folders and the work root use this character set only. tmux
 # expands formats such as #(cmd) in a session's start directory, and a
 # trailing ";" splits a tmux command line; neither character can appear.
@@ -297,8 +300,8 @@ def _heteronym(name: str, data: Any, templates: dict[str, Template],
                work_root: str, errors: list[str]) -> Heteronym | None:
     where = f"heteronyms.{name}"
     start = len(errors)
-    if not isinstance(name, str) or not NAME_RE.match(name):
-        errors.append(f"{where}: name must match {NAME_RE.pattern}")
+    if not isinstance(name, str) or not HETERONYM_NAME_RE.match(name):
+        errors.append(f"{where}: name must match {HETERONYM_NAME_RE.pattern}")
         return None
     if not isinstance(data, dict):
         errors.append(f"{where}: must be a mapping")

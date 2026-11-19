@@ -32,8 +32,9 @@ heteronyms:
     enabled: true | false          # default: true
 ```
 
-- `<name>` matches `^[a-z][a-z0-9-]{0,31}$`. It names the session and is
-  substituted for `{name}` in folder patterns.
+- `<name>` matches `^[a-z][a-z0-9-]{0,29}$`. It names the session and the
+  heteronym's Unix user (`h-<name>`, within Linux's 32 characters, §6), and
+  is substituted for `{name}` in folder patterns.
 - `<tier>` is one of `fast`, `standard`, `strong`, `frontier`, the abstract
   tiers of disciplined-project-seed (draft ADR-0020). The runtime maps tiers
   to models; heteronyms never name a model.
@@ -183,6 +184,9 @@ session:
   pass_env: [<NAME>, …]         # variables copied from the supervisor's environment
   env: {<NAME>: <value>, …}     # literal variables for every session
 tmux_socket: <name>             # default pessoa; [A-Za-z0-9_-]{1,64}
+isolation: users | none         # default users (§6)
+homes: <absolute path>          # default /homes: each heteronym's home (§6)
+uid_base: <integer>             # default 20000: first uid handed out (§6)
 ```
 
 `command` arguments may contain these placeholders, and no others:
@@ -193,6 +197,10 @@ tmux_socket: <name>             # default pessoa; [A-Za-z0-9_-]{1,64}
 | `{name}` | the heteronym name |
 | `{workdir}` | the heteronym's first folder |
 | `{settings}` | `{"permissions":{"allow":[…],"deny":[…]}}`, the heteronym's resolved lists as compact JSON |
+
+Values in `env` may use `{home}`, `{name}` and `{user}`, the heteronym's own
+home, name and Unix user; for Claude Code, `CLAUDE_CONFIG_DIR: "{home}/.claude"`
+keeps each heteronym's settings, history and sign-in in its own home.
 
 For Claude Code, `--settings {settings}` passes the caps at launch; the tool
 merges them with the workspace's own settings (§2.3).
@@ -301,3 +309,64 @@ exception in one pass is logged and the loop goes on.
 - Log lines go to stdout, one per action, with a timestamp.
 
 Verified by: `tests/test_supervise.py`.
+
+## 6. Isolation by operating-system user
+
+Each heteronym runs as its own Unix user, so no session can read another's
+folders, home or memory, whatever its permission rules say. This is the
+default (`isolation: users`).
+
+### 6.1 Users
+
+- Heteronym `<name>` runs as user and group `h-<name>`.
+- Its uid comes from `users.json` in the state directory, handed out from
+  `uid_base` in order and never reused for another name. A recreated
+  container, whose `/etc/passwd` starts empty, recreates each user with its
+  old uid, so its folders stay its own.
+- The user is created the first time the heteronym starts. Only heteronyms
+  of the container's own class (§1.5) ever get a user.
+
+### 6.2 Folders
+
+The heteronym's home (`<homes>/<name>`) and every folder in its definition
+are owned by its user, mode 700. A missing folder under a root-owned parent
+is made by the supervisor and handed over; one under the heteronym's own
+folders is made as the heteronym. A folder owned by anyone else, or a
+symlink, is refused and the session is not started.
+
+### 6.3 Sessions and sign-in
+
+- Each heteronym has its own tmux server, run as its user with no
+  capabilities (`setpriv --reuid --regid --clear-groups`). Its session's
+  `HOME`, `USER` and `LOGNAME` are its own (§4.2).
+- Each heteronym signs in once, on its own: `relayer login <name>` runs the
+  agent program interactively as that user, in its workspace, with the
+  session's environment. Its credentials then live in its own home.
+
+### 6.4 Capabilities
+
+The supervisor runs as root inside its container with exactly `CAP_CHOWN`,
+`CAP_SETUID` and `CAP_SETGID`; the container drops every other capability
+and keeps `no-new-privileges` (setpriv is not a setuid program, so that
+flag does not stop it).
+
+Two shapes were possible: (a) an entrypoint that creates every user as
+root and then drops all capabilities before starting the supervisor, or
+(b) a supervisor that keeps these three. This is (b). Under (a) a heteronym
+created at run time, from chat, needs the container restarted to get its
+user, and a restart ends every session in the class, losing each one's
+context, every time one is created. Under (b) the supervisor holds no
+`DAC_OVERRIDE` or `DAC_READ_SEARCH`, so even it cannot read inside a
+heteronym's folders; what it must do there, it does as that heteronym.
+
+### 6.5 Without isolation
+
+`isolation: none` runs every session as the supervisor's own user, with no
+users, no ownership changes and no isolation between heteronyms. It is for
+running outside a container: tests and single-user development.
+
+Verified by: `tests/test_users.py` (`RealUsers` creates real users and runs
+one case with only the three capabilities; CI runs it as root), and
+`scripts/image-smoke.sh` (the image under compose's exact capabilities: the
+session's process is `h-<name>` with no capabilities, its folders are 700,
+and root in the container cannot read them).

@@ -1,8 +1,10 @@
-# Example runtime config for Claude Code (docs/SPEC.md §3). Copy and adjust;
-# nothing here names a host.
+# Example runtime config for Claude Code (docs/SPEC.md §3). One per container;
+# copy and adjust. Nothing here names a host.
 version: 1
 class: assistants          # the trust class this container runs (docs/SPEC.md §1.5)
 work_root: /work
+isolation: users           # one Unix user per heteronym (docs/SPEC.md §6)
+homes: /homes              # each heteronym's own home: its Claude config and sign-in
 models:
   fast: haiku
   standard: sonnet
@@ -10,10 +12,12 @@ models:
   frontier: fable
 session:
   command: ["claude", "--model", "{model}", "--settings", "{settings}"]
-  # Sessions inherit nothing (docs/SPEC.md §4.2): HOME, PATH, LANG, USER and
-  # SHELL are passed and TERM is set; everything else must be listed here.
-  # The image sets these three. Without CLAUDE_CONFIG_DIR a session would not
-  # find the sign-in on the mounted volume.
-  pass_env: [CLAUDE_CONFIG_DIR, DISABLE_AUTOUPDATER, DISABLE_UPDATES]
-  env: {}
+  # Sessions inherit nothing (docs/SPEC.md §4.2): HOME, USER and LOGNAME are
+  # the heteronym's own, PATH, LANG and SHELL are passed, TERM is set, and
+  # everything else must be listed here.
+  pass_env: [DISABLE_AUTOUPDATER, DISABLE_UPDATES]
+  env:
+    # Each heteronym keeps its Claude settings, history and sign-in in its
+    # own home, which no other heteronym can read.
+    CLAUDE_CONFIG_DIR: "{home}/.claude"
 tmux_socket: pessoa

@@ -39,11 +39,16 @@ class SessionError(RuntimeError):
 
 
 class TmuxBackend:
-    def __init__(self, socket: str, tmux: str = "tmux"):
-        self._base = [tmux, "-L", socket, "-f", "/dev/null"]
+    def __init__(self, socket: str, tmux: str = "tmux", prefix: list[str] | None = None,
+                 home: str | None = None):
+        # ``prefix`` runs tmux as another user (setpriv), so that user owns
+        # the tmux server and every session in it (docs/SPEC.md §6).
+        self._base = [*(prefix or []), tmux, "-L", socket, "-f", "/dev/null"]
         # A tmux server inherits the environment of the client that starts
         # it; give it nothing worth inheriting.
         self._env = {k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ}
+        if home is not None:
+            self._env["HOME"] = home
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         proc = subprocess.run([*self._base, *args], capture_output=True, text=True,
@@ -97,3 +102,42 @@ class TmuxBackend:
 
     def stop(self, name):
         self._run("kill-session", "-t", f"={name}")
+
+
+class UserTmuxBackend:
+    """One tmux server per heteronym, each owned by that heteronym's user.
+
+    ``accounts`` is a :class:`relayer.users.Accounts`. Listing walks every
+    heteronym that has ever had a uid, so the sessions of one removed from
+    the definitions are still found, and stopped.
+    """
+
+    def __init__(self, socket: str, accounts, tmux: str = "tmux"):
+        self.socket = socket
+        self.accounts = accounts
+        self.tmux = tmux
+
+    def _for(self, ident) -> TmuxBackend:
+        return TmuxBackend(self.socket, self.tmux, prefix=ident.as_user(), home=ident.home)
+
+    def list(self) -> dict[str, Running]:
+        running: dict[str, Running] = {}
+        for ident in self.accounts.known():
+            found = self._for(ident).list()
+            # A user's server holds only that heteronym's session.
+            if ident.name in found:
+                running[ident.name] = found[ident.name]
+        return running
+
+    def prepare(self, heteronym) -> None:
+        self.accounts.prepare(heteronym.name, heteronym.folders)
+
+    def identity(self, name: str) -> dict[str, str]:
+        return self.accounts.identity(name).env()
+
+    def start(self, name, command, workdir, config_hash):
+        self._for(self.accounts.identity(name)).start(name, command, workdir, config_hash)
+
+    def stop(self, name):
+        self._for(self.accounts.identity(name)).stop(name)
+

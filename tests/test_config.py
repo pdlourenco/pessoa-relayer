@@ -173,6 +173,10 @@ class Rejections(unittest.TestCase):
         self.assertRejected(heteronym_file("pa: {class: assistants, template: nope}\n"),
                             "unknown template 'nope'")
 
+    def test_name_too_long_for_a_user(self):
+        self.assertRejected(heteronym_file("a" + "b" * 30 + ": {class: assistants, template: assistant}\n"),
+                            "name must match")
+
     def test_bad_name(self):
         self.assertRejected(heteronym_file("Bad_Name: {class: assistants, template: assistant}\n"),
                             "name must match")
