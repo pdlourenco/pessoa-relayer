@@ -15,10 +15,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import ConfigError, Heteronym, _is_version, _load_yaml, _unknown_keys
+from .config import (NAME_RE, ConfigError, Heteronym, _is_version, _load_yaml,
+                     _unknown_keys)
 from .tiers import TIERS
 
-RUNTIME_KEYS = {"version", "work_root", "models", "session", "tmux_socket"}
+RUNTIME_KEYS = {"version", "class", "work_root", "models", "session", "tmux_socket"}
 SESSION_KEYS = {"command", "env", "pass_env"}
 PLACEHOLDERS = {"model", "name", "workdir", "settings"}
 SOCKET_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -35,6 +36,7 @@ BASE_ENV = ("HOME", "PATH", "LANG", "USER", "SHELL")
 
 @dataclass(frozen=True)
 class Runtime:
+    klass: str | None = None        # trust class this container runs (SPEC §1.5)
     work_root: str = "/work"
     models: dict[str, str] = field(default_factory=dict)
     command: tuple[str, ...] = ()
@@ -102,6 +104,12 @@ def load_runtime(path: Path) -> Runtime:
     if not _is_version(data.get("version")):
         errors.append(f"{where}: version must be 1")
 
+    klass = data.get("class")
+    if not isinstance(klass, str) or not NAME_RE.match(klass):
+        errors.append(f"{where}.class: required; the trust class this container "
+                      f"runs, matching {NAME_RE.pattern}")
+        klass = None
+
     work_root = data.get("work_root", "/work")
     if not isinstance(work_root, str):
         errors.append(f"{where}.work_root: must be a string")
@@ -158,7 +166,7 @@ def load_runtime(path: Path) -> Runtime:
 
     if errors:
         raise ConfigError(errors)
-    return Runtime(work_root=work_root, models=dict(models), command=tuple(command),
+    return Runtime(klass=klass, work_root=work_root, models=dict(models), command=tuple(command),
                    env=dict(env), pass_env=tuple(pass_env), tmux_socket=socket)
 
 
