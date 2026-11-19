@@ -7,7 +7,9 @@ default_tier: standard
 folders: ["{work}/{name}"]
 permissions:
   allow: [Read, Edit, Write, WebSearch, WebFetch]
-  deny: ["Bash(rm -rf:*)"]
+  # Edit(./.claude/**) stops a persona widening its own permissions through
+  # its project settings (docs/SPEC.md §2.3). Deny wins at every level.
+  deny: ["Edit(./.claude/**)", "Bash(rm *)"]
 channel_kinds: [signal, telegram]
 idle_stop: 2h
 chat_creatable: true

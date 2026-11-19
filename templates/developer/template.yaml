@@ -7,8 +7,8 @@ max_tier: frontier
 default_tier: strong
 folders: ["{work}/{name}"]
 permissions:
-  allow: [Read, Edit, Write, Grep, Glob, "Bash(git:*)", "Bash(make test:*)"]
-  deny: ["Bash(rm -rf:*)", "Bash(curl:*)"]
+  allow: [Read, Edit, Write, Grep, Glob, "Bash(git *)", "Bash(make test *)"]
+  deny: ["Edit(./.claude/**)", "Bash(rm *)", "Bash(curl *)"]
 channel_kinds: [signal, telegram]
 idle_stop: 8h
 chat_creatable: false

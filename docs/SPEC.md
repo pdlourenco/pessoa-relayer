@@ -53,9 +53,17 @@ Verified by: `tests/test_config.py::ValidPersona`.
 
 No two personas may share a folder, and no persona's folder may sit inside
 another's. Personas exchange work through the forge or notes, never through
-shared folders.
+shared folders. No two personas may use the same channel `kind` and `chat`,
+since both sessions would answer every message there.
 
-Verified by: `tests/test_config.py::Rejections::test_overlapping_personas`.
+Paths are compared after collapsing repeated leading slashes (`//work` is
+`/work`). No folder may resolve to `/`, and the work root must be an
+absolute, normalised path below `/` without `{` or `}`.
+
+Verified by: `tests/test_config.py::Rejections` (`test_overlapping_personas`,
+`test_same_folder_twice`, `test_nesting_in_the_other_direction`,
+`test_double_slash_cannot_dodge_isolation`, `test_shared_chat`,
+`test_work_root_slash_and_braces`).
 
 ### 1.4 Configuration hash
 
@@ -75,18 +83,22 @@ into a new persona's folder (CLAUDE.md, settings).
 ### 2.1 Shape
 
 ```yaml
-version: 1
-description: <one line>
-max_tier: <tier>
-default_tier: <tier>            # not above max_tier
-folders: [<folder pattern>, …]  # roots; persona folders must sit within one
-permissions:
+version: 1                      # required
+description: <one line>         # default ""
+max_tier: <tier>                # required
+default_tier: <tier>            # required; not above max_tier
+folders: [<folder pattern>, …]  # required, non-empty; roots persona folders sit within
+permissions:                    # default: both lists empty
   allow: [<rule>, …]            # the most a persona may be granted
   deny: [<rule>, …]             # always applied
-channel_kinds: [<kind>, …]      # channel kinds a persona may use
-idle_stop: <duration>           # default for personas; default never
+channel_kinds: [<kind>, …]      # default []: personas get no channel
+idle_stop: <duration>           # default never
 chat_creatable: true | false    # default false
 ```
+
+In `personas.yaml`, an explicit `folders: []` is an error, `personas:` must
+be a mapping (empty or absent means no personas), and `version` must be the
+integer `1`.
 
 `<rule>` is an opaque permission string passed to the agent tool (for
 Claude Code, a permission rule such as `Bash(git:*)`). The runtime compares
@@ -106,3 +118,16 @@ write access or a forge token) whose personas may only be added by editing
 `personas.yaml`, never from a chat request.
 
 Verified by: `tests/test_config.py::Rejections` (one case per cap).
+
+### 2.3 Caps reach the session, not the workspace
+
+The runtime passes a persona's allow and deny lists to the agent tool at
+launch (a later PR). The tool also reads the workspace's own settings, which
+the persona can edit, and allow lists merge across levels. A template should
+therefore deny edits to the workspace's settings directory; for Claude Code,
+`Edit(./.claude/**)`. Deny wins at every level in Claude Code
+(<https://code.claude.com/docs/en/permissions>, retrieved 2026-11-19). Two
+limits remain: an `Edit` rule does not cover writes made through a shell,
+and a permission-skipping mode ignores it. Which mechanism enforces the caps
+in practice (permission rules or a pre-tool hook) is a deployment choice
+this runtime does not make.

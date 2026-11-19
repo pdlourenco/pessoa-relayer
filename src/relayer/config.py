@@ -113,6 +113,9 @@ def _construct_mapping(loader, node, deep=False):
     seen = set()
     for key_node, _ in node.value:
         key = loader.construct_object(key_node, deep=deep)
+        if not isinstance(key, (str, int, float, bool)) and key is not None:
+            raise yaml.constructor.ConstructorError(
+                None, None, "mapping keys must be scalars", key_node.start_mark)
         if key in seen:
             raise yaml.constructor.ConstructorError(
                 None, None, f"duplicate key {key!r}", key_node.start_mark)
@@ -130,7 +133,7 @@ def _load_yaml(path: Path) -> Any:
             return yaml.load(fh, Loader=_StrictLoader)  # noqa: S506 (strict safe loader)
     except FileNotFoundError:
         raise ConfigError([f"{path}: file not found"]) from None
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, OSError, UnicodeDecodeError) as exc:
         raise ConfigError([f"{path}: {exc}"]) from None
 
 
@@ -145,6 +148,11 @@ def parse_duration(value: Any) -> int | None:
         if m:
             return int(m.group(1)) * DURATION_UNITS[m.group(2)]
     raise ValueError(f"{value!r} is not a duration like 30m, 2h, 1d or 'never'")
+
+
+def _is_version(value: Any) -> bool:
+    # bool is an int subclass: `version: true` must not pass as 1.
+    return type(value) is int and value == FORMAT_VERSION
 
 
 def _str_list(value: Any, where: str, errors: list[str]) -> tuple[str, ...]:
@@ -175,7 +183,12 @@ def resolve_folder(pattern: str, work_root: str, name: str) -> str:
     path = pattern.replace("{work}", work_root).replace("{name}", name)
     if not path.startswith("/"):
         raise ValueError(f"{path!r} is not absolute")
-    return posixpath.normpath(path)
+    # normpath keeps a leading "//" (POSIX leaves it implementation-defined);
+    # on Linux it is the same directory as "/", so collapse it first.
+    path = posixpath.normpath("/" + path.lstrip("/"))
+    if path == "/":
+        raise ValueError("resolves to /, which would contain every folder")
+    return path
 
 
 def _within(path: str, root: str) -> bool:
@@ -193,7 +206,7 @@ def load_template(path: Path) -> Template:
     if not isinstance(data, dict):
         raise ConfigError([f"{where}: must be a mapping"])
     _unknown_keys(data, TEMPLATE_KEYS, where, errors)
-    if data.get("version") != FORMAT_VERSION:
+    if not _is_version(data.get("version")):
         errors.append(f"{where}.version: must be {FORMAT_VERSION}")
     if not NAME_RE.match(name):
         errors.append(f"{where}: directory name must match {NAME_RE.pattern}")
@@ -275,7 +288,8 @@ def _persona(name: str, data: Any, templates: dict[str, Template],
         return None
     _unknown_keys(data, PERSONA_KEYS, where, errors)
 
-    tpl = templates.get(data.get("template"))
+    tpl_name = data.get("template")
+    tpl = templates.get(tpl_name) if isinstance(tpl_name, str) else None
     if tpl is None:
         errors.append(f"{where}.template: unknown template {data.get('template')!r}")
         return None
@@ -296,7 +310,7 @@ def _persona(name: str, data: Any, templates: dict[str, Template],
             if kind not in tpl.channel_kinds:
                 errors.append(f"{where}.channel.kind: {kind!r} not allowed by "
                               f"template {tpl.name!r} ({list(tpl.channel_kinds)})")
-            if not isinstance(chat, str) or not chat:
+            if not isinstance(chat, str) or not chat.strip():
                 errors.append(f"{where}.channel.chat: must be a non-empty string")
             if isinstance(kind, str) and isinstance(chat, str):
                 channel = Channel(kind=kind, chat=chat)
@@ -305,8 +319,11 @@ def _persona(name: str, data: Any, templates: dict[str, Template],
     for pattern in tpl.folders:
         roots.append(resolve_folder(pattern, work_root, name))
     folders: list[str] = []
-    for pattern in _str_list(data.get("folders", list(tpl.folders)),
-                             f"{where}.folders", errors):
+    patterns = _str_list(data.get("folders", list(tpl.folders)),
+                         f"{where}.folders", errors)
+    if "folders" in data and isinstance(data["folders"], list) and not data["folders"]:
+        errors.append(f"{where}.folders: must name at least one folder")
+    for pattern in patterns:
         try:
             path = resolve_folder(pattern, work_root, name)
         except ValueError as exc:
@@ -345,9 +362,19 @@ def _persona(name: str, data: Any, templates: dict[str, Template],
 
 
 def _overlaps(personas: dict[str, Persona]) -> list[str]:
-    """Two personas may not share or nest folders (docs/SPEC.md §1.3)."""
+    """No shared or nested folders, no shared chat (docs/SPEC.md §1.3)."""
     errors = []
     items = sorted(personas.items())
+    chats: dict[tuple[str, str], str] = {}
+    for name, p in items:
+        if p.channel is None:
+            continue
+        key = (p.channel.kind, p.channel.chat)
+        if key in chats:
+            errors.append(f"personas.{name}.channel: {p.channel.kind} chat "
+                          f"{p.channel.chat!r} is already used by personas.{chats[key]}")
+        else:
+            chats[key] = name
     for i, (a_name, a) in enumerate(items):
         for b_name, b in items[i + 1:]:
             for fa in a.folders:
@@ -366,15 +393,20 @@ def load_personas(path: Path, templates: dict[str, Template],
     if not isinstance(data, dict):
         raise ConfigError([f"{path}: must be a mapping"])
     _unknown_keys(data, {"version", "personas"}, str(path), errors)
-    if data.get("version") != FORMAT_VERSION:
+    if not _is_version(data.get("version")):
         errors.append(f"{path}: version must be {FORMAT_VERSION}")
-    entries = data.get("personas") or {}
+    entries = data.get("personas")
+    if entries is None:
+        entries = {}
     if not isinstance(entries, dict):
         raise ConfigError(errors + [f"{path}: personas must be a mapping"])
 
-    if not work_root.startswith("/") or posixpath.normpath(work_root) != work_root:
+    if (not work_root.startswith("/") or work_root.startswith("//")
+            or posixpath.normpath(work_root) != work_root or work_root == "/"
+            or "{" in work_root or "}" in work_root):
         raise ConfigError(errors + [f"work root {work_root!r} must be an "
-                                    "absolute, normalised path"])
+                                    "absolute, normalised path below /, "
+                                    "without braces"])
 
     personas: dict[str, Persona] = {}
     for name, entry in entries.items():

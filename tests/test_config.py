@@ -90,15 +90,28 @@ class ValidPersona(unittest.TestCase):
         self.assertEqual(p.channel.chat, "group.abc")
         self.assertIsNone(p.idle_stop)
 
-    def test_hash_changes_with_shape_not_with_enabled(self):
-        a = Workspace(persona_file("pa: {template: assistant}\n"))
-        b = Workspace(persona_file("pa: {template: assistant, enabled: false}\n"))
-        c = Workspace(persona_file("pa: {template: assistant, tier: strong}\n"))
-        for ws in (a, b, c):
-            self.addCleanup(ws.close)
-        ha, hb, hc = (ws.load()["pa"].config_hash() for ws in (a, b, c))
-        self.assertEqual(ha, hb)
-        self.assertNotEqual(ha, hc)
+    def _hash(self, entry: str, templates=None) -> str:
+        ws = Workspace(persona_file(f"pa: {{template: assistant{entry}}}\n"), templates)
+        self.addCleanup(ws.close)
+        return ws.load()["pa"].config_hash()
+
+    def test_hash_ignores_enabled_and_idle_stop(self):
+        base = self._hash("")
+        self.assertEqual(base, self._hash(", enabled: false"))
+        self.assertEqual(base, self._hash(", idle_stop: 5m"))
+
+    def test_hash_covers_session_shape(self):
+        base = self._hash("")
+        variants = {
+            "tier": self._hash(", tier: strong"),
+            "permissions": self._hash(", permissions: [Read]"),
+            "folders": self._hash(', folders: ["{work}/pa/sub"]'),
+            "channel": self._hash(", channel: {kind: signal, chat: g}"),
+            "deny": self._hash("", {"assistant": ASSISTANT.replace("[Danger]", "[Other]")}),
+        }
+        for field, value in variants.items():
+            with self.subTest(field=field):
+                self.assertNotEqual(base, value)
 
 
 class Rejections(unittest.TestCase):
@@ -198,6 +211,85 @@ class Rejections(unittest.TestCase):
         self.assertRejected(persona_file("pa: {template: assistant}\n"),
                             "template assistant.max_teir: unknown key",
                             {"assistant": bad})
+
+    def test_sibling_prefix_is_not_inside_root(self):
+        # /work/pax shares a string prefix with root /work/pa but is not in it.
+        self.assertRejected(persona_file('pa: {template: assistant, folders: ["{work}/{name}x"]}\n'),
+                            "'/work/pax' is outside template")
+
+    def test_same_folder_twice(self):
+        templates = {"assistant": ASSISTANT.replace('["{work}/{name}"]', '["{work}"]')}
+        self.assertRejected(persona_file("""\
+            pa: {template: assistant, folders: ["{work}/shared"]}
+            pb: {template: assistant, folders: ["{work}/shared"]}
+            """), "overlaps personas.pb folder", templates)
+
+    def test_nesting_in_the_other_direction(self):
+        templates = {"assistant": ASSISTANT.replace('["{work}/{name}"]', '["{work}"]')}
+        self.assertRejected(persona_file("""\
+            pa: {template: assistant, folders: ["{work}/shared/sub"]}
+            pb: {template: assistant, folders: ["{work}/shared"]}
+            """), "overlaps personas.pb folder", templates)
+
+    def test_double_slash_cannot_dodge_isolation(self):
+        templates = {"assistant": ASSISTANT.replace('["{work}/{name}"]', '["{work}"]')}
+        self.assertRejected(persona_file("""\
+            pa: {template: assistant, folders: ["/work/x"]}
+            pb: {template: assistant, folders: ["//work/x"]}
+            """), "overlaps personas.pb folder", templates)
+
+    def test_template_root_slash(self):
+        bad = ASSISTANT.replace('["{work}/{name}"]', '["/"]')
+        self.assertRejected(persona_file("pa: {template: assistant}\n"),
+                            "resolves to /", {"assistant": bad})
+
+    def test_work_root_slash_and_braces(self):
+        for root in ("/", "//work", "/w{name}"):
+            with self.subTest(root=root):
+                self.assertRejected(persona_file("pa: {template: assistant}\n"),
+                                    "work root", work_root=root)
+
+    def test_shared_chat(self):
+        self.assertRejected(persona_file("""\
+            pa: {template: assistant, channel: {kind: signal, chat: g1}}
+            pb: {template: assistant, channel: {kind: signal, chat: g1}}
+            """), "is already used by personas.pa")
+
+    def test_blank_chat(self):
+        self.assertRejected(persona_file("pa: {template: assistant, channel: {kind: signal, chat: ' '}}\n"),
+                            "channel.chat: must be a non-empty string")
+
+    def test_empty_folders(self):
+        self.assertRejected(persona_file("pa: {template: assistant, folders: []}\n"),
+                            "must name at least one folder")
+
+    def test_personas_not_a_mapping(self):
+        for value in ("[]", "false", "0"):
+            with self.subTest(value=value):
+                self.assertRejected(f"version: 1\npersonas: {value}\n",
+                                    "personas must be a mapping")
+
+    def test_version_true_is_not_1(self):
+        self.assertRejected("version: true\npersonas: {}\n", "version must be 1")
+
+    def test_malformed_inputs_raise_config_error(self):
+        cases = {
+            "template is a list": persona_file("pa: {template: [assistant]}\n"),
+            "non-scalar key": "version: 1\npersonas:\n  ? [a]\n  : 1\n",
+        }
+        for label, body in cases.items():
+            with self.subTest(label):
+                self.assertRejected(body, "")
+
+    def test_invalid_utf8_and_directory(self):
+        ws = Workspace(persona_file("pa: {template: assistant}\n"))
+        self.addCleanup(ws.close)
+        ws.personas.write_bytes(b"version: 1\n\xff\n")
+        with self.assertRaises(ConfigError):
+            ws.load()
+        templates = load_templates(ws.root / "templates")
+        with self.assertRaises(ConfigError):
+            load_personas(ws.root, templates)
 
     def test_all_errors_reported_together(self):
         ws = Workspace(persona_file("""\
