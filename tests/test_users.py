@@ -284,6 +284,30 @@ class RealUsers(unittest.TestCase):
         self.assertNotEqual(stranger.uid, old.uid)
         self.assertEqual(self.accounts.identity("pz").uid, old.uid)   # rebuilt from its home
 
+    def _orphan_highest(self, folders_for_old):
+        """``top`` then ``old`` (the highest uid); then the map, old's home
+        and its user are lost. Returns old's identity."""
+        top = self.accounts.prepare("top", (str(self.root / "work" / "top"),))
+        self.addCleanup(remove_user, top)        # the map that names it is lost
+        old = self.accounts.prepare("old", folders_for_old)
+        self.accounts.uids.path.unlink()
+        shutil.rmtree(old.home)
+        remove_user(old)
+        return old
+
+    def test_a_lost_map_counts_owners_of_nested_folders(self):
+        """Probe review of #6: /work/old is root's, old owns /work/old/notes."""
+        old = self._orphan_highest((str(self.root / "work" / "old" / "notes"),))
+        self.assertEqual(os.stat(self.root / "work" / "old").st_uid, 0)
+        self.assertNotEqual(self.accounts.identity("newcomer").uid, old.uid)
+
+    def test_a_lost_map_counts_owners_under_other_roots(self):
+        live = self.root / "live"
+        live.mkdir(mode=0o755)
+        self.accounts.other_roots = (str(live),)
+        old = self._orphan_highest((str(live / "old"),))
+        self.assertNotEqual(self.accounts.identity("newcomer").uid, old.uid)
+
     def test_parents_made_on_the_way_stay_roots(self):
         d = str(self.root / "work" / "projects" / "delta")
         e = str(self.root / "work" / "projects" / "eps")
@@ -309,6 +333,58 @@ class RealUsers(unittest.TestCase):
         backend.stop("pa")
         self.assertEqual(__import__("relayer.users", fromlist=["x"]).processes_of(ident.uid), [])
         self.assertEqual(backend.list(), {})
+
+    def _assert_listing_survives(self, attack):
+        """Start pa, let ``attack(ident, backend)`` make its tmux server
+        unresponsive, then list: it must come back, report pa, and leave pa
+        nothing running (probe review of #6)."""
+        import threading
+        from relayer.users import processes_of
+        backend = UserTmuxBackend(f"relayer-it-{os.getpid()}", self.accounts, timeout=1)
+        pa = self.h("pa")
+        backend.prepare(pa)
+        backend.start("pa", "sleep 300", pa.folders[0], "ab12")
+        ident = self.accounts.identity("pa")
+        attack(ident, backend)
+        result = {}
+        t = threading.Thread(target=lambda: result.update(listed=backend.list()), daemon=True)
+        t.start()
+        t.join(30)
+        self.assertFalse(t.is_alive(), "list() stalled on an unresponsive tmux server")
+        self.assertNotIn("pa", result["listed"])
+        self.assertTrue(any("pa" in e for e in backend.errors), backend.errors)
+        self.assertEqual(processes_of(ident.uid), [])
+
+    def test_a_stopped_tmux_server_does_not_stall_listing(self):
+        def stop_server(ident, backend):
+            subprocess.run([*ident.as_user(), "pkill", "-STOP", "-u", str(ident.uid), "-x",
+                            "tmux: server"], check=False)
+            subprocess.run([*ident.as_user(), "pkill", "-STOP", "-u", str(ident.uid), "tmux"],
+                           check=True)
+        self._assert_listing_survives(stop_server)
+
+    def test_a_silent_listener_on_the_socket_does_not_stall_listing(self):
+        def squat(ident, backend):
+            sock = f"{ident.home}/tmux-{ident.uid}/{backend.socket}"
+            env = ["env", f"HOME={ident.home}", f"TMUX_TMPDIR={ident.home}"]
+            subprocess.run([*ident.as_user(), *env, "tmux", "-L", backend.socket,
+                            "kill-server"], check=True)
+            listener = ("import os, socket, time\n"
+                        f"p = {sock!r}\n"
+                        "while os.path.exists(p):\n"
+                        "    try: os.unlink(p)\n"
+                        "    except OSError: time.sleep(0.05)\n"
+                        "s = socket.socket(socket.AF_UNIX); s.bind(p); s.listen(8)\n"
+                        "open(p + '.ready', 'w').close()\n"
+                        "held = []\n"
+                        "while True: held.append(s.accept())\n")
+            subprocess.run([*ident.as_user(), "setsid", "-f", "python3", "-c", listener],
+                           check=True)
+            deadline = time.time() + 5
+            while not os.path.exists(sock + ".ready") and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(os.path.exists(sock + ".ready"), "listener did not start")
+        self._assert_listing_survives(squat)
 
     def test_session_runs_as_its_user_and_others_cannot_look_in(self):
         backend = UserTmuxBackend(f"relayer-it-{os.getpid()}", self.accounts)

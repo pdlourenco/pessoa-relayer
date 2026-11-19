@@ -22,10 +22,12 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 USER_PREFIX = "h-"          # keeps heteronym users clear of system names
 DEFAULT_UID_BASE = 20000
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,29}$")   # + prefix stays within 32
+MAX_OWNER_SCAN = 100_000    # entries walked when rebuilding; beyond it, refuse
 
 
 class AccountError(RuntimeError):
@@ -69,14 +71,15 @@ class UidMap:
         return data
 
     def uid(self, name: str, owner_hint: int | None = None,
-            taken: frozenset[int] = frozenset()) -> int:
+            taken: frozenset[int] | Callable[[], set[int]] = frozenset()) -> int:
         """The uid for ``name``, assigning one if new.
 
         ``owner_hint`` is the uid that already owns the heteronym's home,
         if any: a lost or reset map is rebuilt from the files rather than
         handing those files to a stranger. ``taken`` holds uids that own
-        anything in the homes or work trees; none is ever handed to a new
-        name (docs/SPEC.md §6.1).
+        anything under the folder roots, or is a function returning them,
+        called only when a uid must be assigned; none of them is ever handed
+        to a new name (docs/SPEC.md §6.1).
         """
         if not _NAME_RE.match(name):
             raise AccountError(f"not a heteronym name usable as a user: {name!r}")
@@ -87,7 +90,7 @@ class UidMap:
             assigned = self.load()
             if name in assigned:
                 return assigned[name]
-            used = set(assigned.values()) | set(taken)
+            used = set(assigned.values()) | set(taken() if callable(taken) else taken)
             if owner_hint is not None and owner_hint >= self.base and \
                     owner_hint not in set(assigned.values()):
                 uid = owner_hint
@@ -106,17 +109,50 @@ class UidMap:
 class Accounts:
     """Creates users and their folders; needs root with CHOWN/SETUID/SETGID."""
 
-    def __init__(self, uids: UidMap, homes_root: str, work_root: str = "/work"):
+    def __init__(self, uids: UidMap, homes_root: str, work_root: str = "/work",
+                 other_roots: tuple[str, ...] = ()):
         self.uids = uids
         self.homes_root = homes_root
         self.work_root = work_root
+        # Further roots under which heteronyms own folders (the memory live
+        # root): their owners count as taken too.
+        self.other_roots = tuple(other_roots)
 
-    def _owners(self, root: str) -> set[int]:
-        try:
-            with os.scandir(root) as it:
-                return {e.stat(follow_symlinks=False).st_uid for e in it} - {0}
-        except FileNotFoundError:
-            return set()
+    def _owners(self) -> set[int]:
+        """Every non-root uid owning an entry reachable from a folder root
+        through root-owned directories.
+
+        A defined folder can sit below parents root made on the way
+        (``/work/x/notes``), so the top level is not enough. Only root-owned
+        directories are entered: a heteronym cannot add entries to those, so
+        the walk is root's own tree and nothing a heteronym plants can
+        lengthen or redirect it. Symlinks are not followed. A walk that
+        cannot be completed refuses, rather than risk a uid that owns files.
+        """
+        owners: set[int] = set()
+        seen = 0
+        stack = [self.homes_root, self.work_root, *self.other_roots]
+        while stack:
+            d = stack.pop()
+            try:
+                with os.scandir(d) as it:
+                    for entry in it:
+                        seen += 1
+                        if seen > MAX_OWNER_SCAN:
+                            raise AccountError(
+                                f"more than {MAX_OWNER_SCAN} entries under the folder "
+                                "roots; refusing to assign a new uid without a full scan")
+                        st = entry.stat(follow_symlinks=False)
+                        if st.st_uid:
+                            owners.add(st.st_uid)
+                        elif stat.S_ISDIR(st.st_mode):
+                            stack.append(entry.path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise AccountError(f"{d}: cannot scan for file owners ({exc.strerror}); "
+                                   "refusing to assign a new uid") from None
+        return owners
 
     def identity(self, name: str) -> Identity:
         home = os.path.join(self.homes_root, name)
@@ -125,8 +161,7 @@ class Accounts:
             hint = st.st_uid if stat.S_ISDIR(st.st_mode) and st.st_uid else None
         except FileNotFoundError:
             hint = None
-        taken = frozenset(self._owners(self.homes_root) | self._owners(self.work_root))
-        uid = self.uids.uid(name, owner_hint=hint, taken=taken)
+        uid = self.uids.uid(name, owner_hint=hint, taken=self._owners)
         return Identity(name, USER_PREFIX + name, uid, uid, home)
 
     def known(self) -> list[Identity]:

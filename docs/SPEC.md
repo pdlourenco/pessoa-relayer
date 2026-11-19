@@ -329,7 +329,12 @@ default (`isolation: users`).
   user with its old uid, so its folders stay its own.
 - If the map is lost, a heteronym whose home still exists gets back the uid
   that owns it, and a new heteronym never receives a uid that owns anything
-  in the homes or work trees: files are never handed to a stranger.
+  under the folder roots: files are never handed to a stranger. Before a
+  new uid is assigned, the supervisor walks the homes root, the work root
+  and any other folder root (the memory live root, §7), entering only
+  root-owned directories, so a folder below a parent root made (§6.2) is
+  seen too. A walk that cannot finish (an unreadable directory, more than
+  100 000 entries) refuses the assignment instead of guessing.
 - The user is created the first time the heteronym starts. Only heteronyms
   of the container's own class (§1.5) ever get a user.
 
@@ -361,12 +366,18 @@ are owned by its user, mode 700.
   any other session it makes there is ignored. A server that cannot be
   listed is logged and skipped, so one heteronym can never stop the
   reconcile of its class.
+- Every tmux call has a 10-second limit. A heteronym owns its server and
+  can stop it, or put a listener that never answers on its socket; a call
+  that runs out of time is logged, and every process of that heteronym's
+  uid is ended, as on a stop. If it is still enabled, the next pass starts
+  it afresh.
 - A heteronym whose uid has processes but no recognisable session (it
   renamed or re-tagged its session, or left a daemon) is listed as running
   with no hash, so it is stopped or restarted like any other.
 - Stopping a heteronym ends its tmux session and then every process its uid
-  runs (`kill -KILL -1` as that user); a stop that leaves a process behind
-  is reported as failed.
+  runs (`kill -9` on each of its pids, as that user, repeated until none is
+  left); a stop that leaves a process behind after 5 seconds is reported as
+  failed.
 - Each heteronym signs in once, on its own: `relayer login <name>` runs the
   heteronym's exact session command (§3.1) interactively, as its user, in
   its workspace, with the session's environment, so every first-run prompt
