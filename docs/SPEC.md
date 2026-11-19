@@ -474,6 +474,14 @@ Memory needs `isolation: users` (§6). The heteronym's live folder,
 `<live>/<name>`, is prepared like its other folders (§6.2) and offered to
 its session through the `{memory}` placeholder.
 
+The clone's `.git` holds every heteronym's memory, so the clone must be
+root's alone. At start and before every collect, the supervisor opens
+`repo` without following a symlink: owned by anyone but root, it refuses
+to start; readable or enterable by anyone else, it sets it to mode 700. A
+plain `git clone` on the host makes it 755 with 644 objects, and the bind
+mount hides the image's own `chmod`. The credential root pushes with must
+not be readable by any heteronym either.
+
 ### 7.2 Collecting and committing
 
 Every `interval`, for each heteronym of the container's class that has a
@@ -488,7 +496,10 @@ live folder:
   - a path that is absolute, contains `..` or `:`, is not normalised, is
     deeper than 32 components, or has a git-like component anywhere
     (`.git` and every `.git*` name, any case, with trailing dots or spaces,
-    or anything starting `git~N`) ends the copy;
+    or anything starting `git~N`, all checked after removing Unicode format
+    characters such as U+200C, which HFS+ ignores) ends the copy, as does a
+    name the staging directory cannot hold (repeated, a file and a
+    directory of one name, too long);
   - symlinks are never followed and git-like names are skipped by the
     helper, so a heteronym's own odd files never block its memory;
   - limits: 5 MB a file (skipped and logged), 50 MB, 10 000 files and
@@ -498,7 +509,8 @@ live folder:
     is unchanged;
   - the whole transfer has one 120 s deadline: every read and write on the
     helper's pipes waits only until it (a session holding a copy of a pipe
-    can withhold EOF forever), the helper is killed when it passes, and
+    can withhold EOF forever), the helper is killed when it passes (as its
+    user: root holds no `CAP_KILL`), and
     stderr is drained by a thread that keeps at most 64 KB, so a stopped,
     hung or chatty helper cannot wedge the supervisor;
     it starts in `/` with `python -P`, so no module in its working
@@ -506,10 +518,13 @@ live folder:
   - neither `<repo>/memory` nor `<repo>/memory/<name>` may be a symlink.
 - each heteronym's folder is staged on its own (`git add`), and one that
   git refuses, or that holds a git link, is reported and left out without
-  stopping the others; then the clone is committed
-  (`memory: <names> (<time>)`) and pushed. Git always runs with
-  `core.fsmonitor=false`, `core.hooksPath=/dev/null` and
-  `submodule.recurse=false`.
+  stopping the others. Its folder in the clone is put back to its last
+  commit, since a dirty tree would make the next `git pull --rebase`
+  refuse, blocking every push of the class; its live folder is untouched.
+  Then the clone is committed (`memory: <names> (<time>)`) and pushed. Git
+  always runs with `core.fsmonitor=false`, `core.hooksPath=/dev/null`,
+  `submodule.recurse=false`, `core.protectHFS=true` and
+  `core.protectNTFS=true`.
 
 The helper gets only `PATH`, `PYTHONPATH` and `LANG`: it runs as the
 heteronym, whose session could read a same-uid process's environment, so

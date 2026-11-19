@@ -39,6 +39,7 @@ import sys
 import select
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterator
@@ -52,12 +53,17 @@ _HEADER = struct.Struct(">HQ")      # path length, data length
 _END = _HEADER.pack(0, 0)           # end marker: a record with an empty path
 # Any component git could treat as its own: .git and every .git* name
 # (.gitattributes, .gitmodules, ...), in any case, with the trailing dots or
-# spaces some filesystems drop, and the 8.3 short name "git~1".
+# spaces some filesystems drop, and the 8.3 short name "git~1". Checked after
+# removing Unicode format characters (category Cf), which HFS+ ignores:
+# ".g\u200cit" is ".git" there, and git's fsck rejects it (hasDotgit).
 _GITLIKE = re.compile(r"^(\.git.*|git~\d+.*)$", re.IGNORECASE)
 MAX_DEPTH = 32                      # path components in one memory path
 MAX_DIRS = 10_000                   # directories in one heteronym's memory
 _GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
              "-c", "submodule.recurse=false",
+             # A second line behind _gitlike: git itself refuses paths that
+             # are .git on HFS+ or NTFS checkouts.
+             "-c", "core.protectHFS=true", "-c", "core.protectNTFS=true",
              # Every command, not just commit: `pull --rebase` rewrites commits
              # and needs a committer, and a fresh container has no git identity.
              "-c", "user.name=pessoa-relayer", "-c", "user.email=relayer@localhost")
@@ -68,7 +74,8 @@ class MemoryError_(RuntimeError):
 
 
 def _gitlike(component: str) -> bool:
-    return bool(_GITLIKE.match(component.rstrip(". ")))
+    visible = "".join(c for c in component if unicodedata.category(c) != "Cf")
+    return bool(_GITLIKE.match(visible.rstrip(". ")))
 
 
 def _safe_rel(path: str) -> str:
@@ -181,8 +188,15 @@ def receive(stream: BinaryIO, staging: Path, max_total: int = MAX_TOTAL,
             dirs.update(str(d) for d in parents if str(d) != ".")
             if len(dirs) > MAX_DIRS:
                 raise MemoryError_("memory stream has too many directories")
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600)
+            except OSError as exc:
+                # A repeated name, a file and a directory of one name, or a
+                # name too long for the filesystem.
+                raise MemoryError_(f"memory stream cannot write {rel!r}: "
+                                   f"{exc.strerror}") from None
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
     except BaseException:
@@ -302,8 +316,32 @@ class MemoryRepo:
     def live_dir(self, name: str) -> str:
         return str(self.live / name)
 
+    def secure(self) -> None:
+        """Make sure the clone is the supervisor's own, mode 700.
+
+        Its ``.git`` holds every heteronym's memory, and a plain ``git
+        clone`` on the host makes it 755 with 644 objects (the image's own
+        chmod is hidden by the bind mount), which would let one heteronym
+        read every other's. Owned by anyone else, or a symlink: refused.
+        """
+        try:
+            fd = os.open(self.repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise MemoryError_(f"memory.repo {self.repo}: not a plain directory "
+                               f"({exc.strerror})") from None
+        try:
+            st = os.fstat(fd)
+            if st.st_uid != os.geteuid():
+                raise MemoryError_(f"memory.repo {self.repo} belongs to uid {st.st_uid}; "
+                                   "it must be the supervisor's own (root)")
+            if st.st_mode & 0o077:
+                os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
+
     def _memory_root(self) -> Path:
         """``<repo>/memory``, a real directory, never a symlink."""
+        self.secure()
         root = self.repo / self.subdir
         if root.is_symlink():
             raise MemoryError_(f"{root} is a symlink; refusing to use it")
@@ -322,13 +360,15 @@ class MemoryRepo:
         # supervisor's (git credentials, for one).
         return {k: os.environ[k] for k in ("PATH", "PYTHONPATH", "LANG") if k in os.environ}
 
-    def _run_helper(self, argv: list[str], feed=None, drain=None) -> tuple[int, str]:
+    def _run_helper(self, argv: list[str], as_user: list[str], feed=None,
+                    drain=None) -> tuple[int, str]:
         """Run a helper with one deadline for everything.
 
         ``drain(reader)`` or ``feed(writer)`` runs in this thread on pipe ends
         that give up at the deadline (a held descriptor copy can withhold
         EOF forever); stderr is drained by a thread that keeps at most 64 KB.
-        The helper is killed when the deadline passes.
+        The helper is killed when the deadline passes, as the user it runs
+        as: root here holds no CAP_KILL, so ``proc.kill()`` would fail.
         """
         deadline = time.monotonic() + self.timeout
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE if feed else subprocess.DEVNULL,
@@ -348,12 +388,10 @@ class MemoryRepo:
                 proc.stdin.close()              # EOF: the helper checks nothing follows
             code = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            _kill(proc, as_user)
             raise MemoryError_("memory helper timed out") from None
         except BaseException:
-            proc.kill()
-            proc.wait()
+            _kill(proc, as_user)
             raise
         finally:
             for pipe in (proc.stdin, proc.stdout):
@@ -378,7 +416,8 @@ class MemoryRepo:
 
         try:
             code, err = self._run_helper(
-                self._helper(ident, "dump", self.live_dir(ident.name)), drain=drain)
+                self._helper(ident, "dump", self.live_dir(ident.name)), ident.as_user(),
+                drain=drain)
         except MemoryError_ as exc:
             raise MemoryError_(f"memory of {ident.name} not copied; the saved copy is "
                                f"unchanged: {exc}") from None
@@ -400,7 +439,8 @@ class MemoryRepo:
             dump(src, stdin)
 
         code, err = self._run_helper(
-            self._helper(ident, "load-if-empty", self.live_dir(ident.name)), feed=feed)
+            self._helper(ident, "load-if-empty", self.live_dir(ident.name)), ident.as_user(),
+            feed=feed)
         if code != 0:
             raise MemoryError_(f"restore for {ident.name} failed (exit {code}): {err[-500:]}")
         return True
@@ -425,12 +465,12 @@ class MemoryRepo:
             path = f"{self.subdir}/{name}"
             add = self._git("add", "-A", "--", path, check=False)
             if add.returncode != 0:
-                self._git("reset", "-q", "--", path, check=False)
+                self._discard(path)
                 problems.append(f"memory {name}: not committed: {add.stderr.strip()}")
                 continue
             raw = self._git("diff", "--cached", "--raw", "--", path).stdout
             if any(line.split()[1:2] == ["160000"] for line in raw.splitlines()):
-                self._git("reset", "-q", "--", path, check=False)
+                self._discard(path)
                 problems.append(f"memory {name}: not committed: it contains a git link")
                 continue
             staged.append(name)
@@ -438,6 +478,18 @@ class MemoryRepo:
             return [], problems
         self._git("commit", "-q", "-m", f"memory: {', '.join(staged)} ({when})")
         return staged, problems
+
+    def _discard(self, path: str) -> None:
+        """Return one heteronym's folder in the clone to its last commit.
+
+        Unstaging alone would leave the refused files in the working tree,
+        and `git pull --rebase` refuses a dirty tree: one heteronym would
+        block every push of its class. The live folder is untouched, so the
+        next collect copies it again (and is refused again, for it alone).
+        """
+        self._git("reset", "-q", "--", path, check=False)
+        self._git("checkout", "-q", "HEAD", "--", path, check=False)   # nothing there: fine
+        self._git("clean", "-ffdxq", "--", path, check=False)
 
     def push(self) -> str | None:
         """Push; on rejection, rebase onto the remote and try once more.
@@ -461,6 +513,21 @@ class MemoryRepo:
             return self.push_state.blocked
         self.push_state.blocked = None
         return None
+
+
+def _kill(proc: subprocess.Popen, as_user: list[str]) -> None:
+    """Kill a helper as the user it runs as, then reap it."""
+    if proc.poll() is None:
+        if as_user:
+            # Until it is reaped, the pid cannot be reused: this signals
+            # the helper or nothing.
+            subprocess.run([*as_user, "kill", "-9", str(proc.pid)], capture_output=True)
+        else:
+            proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass                      # left to the heteronym's stop
 
 
 # --- the heteronym's side: `python3 -m relayer.memory <verb> <folder>` -------

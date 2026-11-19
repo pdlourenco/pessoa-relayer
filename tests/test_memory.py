@@ -11,6 +11,7 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from relayer.config import ConfigError
 from relayer.memory import MAGIC, MemoryError_, MemoryRepo, dump, load, receive
@@ -88,6 +89,40 @@ class Stream(unittest.TestCase):
                     load(io.BytesIO(MAGIC + record(bad, b"x") + END), dest)
                 self.assertFalse((self.tmp / "escape").exists())
                 self.assertFalse(dest.exists())
+
+    def test_git_names_hidden_by_ignorable_characters_are_rejected(self):
+        """Probe review of #7: HFS+ ignores format characters, so these are
+        ".git" there, and a fsck'ing origin refuses them (hasDotgit)."""
+        for bad in (".g\u200cit/config", "\u200c.git/config", "a/.gi\ufefft/x",
+                    ".\u200dgit\u200e/x", ".git\u202e/x"):
+            with self.subTest(bad=bad):
+                dest = self.tmp / f"dest{abs(hash(bad))}"
+                with self.assertRaises(MemoryError_):
+                    load(io.BytesIO(MAGIC + record(bad, b"x") + END), dest)
+                self.assertFalse(dest.exists())
+        src, dest = self.tmp / "src", self.tmp / "dest"
+        (src / ".g\u200cit").mkdir(parents=True)
+        (src / ".g\u200cit" / "config").write_text("x")
+        (src / "notes.md").write_text("kept")
+        skipped = self.roundtrip(src, dest)              # skipped by the helper, not fatal
+        self.assertEqual(sorted(p.name for p in dest.rglob("*")), ["notes.md"])
+        self.assertEqual(len(skipped), 1)
+
+    def test_conflicting_or_overlong_names_are_memory_errors(self):
+        """Probe review of #7 (minor): each was an OSError, not MemoryError_."""
+        cases = {
+            "repeated name": record("a", b"1") + record("a", b"2"),
+            "file then directory": record("a", b"1") + record("a/b", b"2"),
+            "directory then file": record("a/b", b"1") + record("a", b"2"),
+            "300-byte name": record("n" * 300, b"1"),
+        }
+        for label, body in cases.items():
+            with self.subTest(label):
+                dest = self.tmp / f"dest-{label.replace(' ', '-')}"
+                with self.assertRaises(MemoryError_):
+                    load(io.BytesIO(MAGIC + body + END), dest)
+                self.assertFalse(dest.exists())
+                self.assertEqual(list(self.tmp.glob("*.incoming")), [])
 
     def test_a_failed_load_leaves_the_old_copy(self):
         dest = self.tmp / "dest"
@@ -246,6 +281,25 @@ class Git(unittest.TestCase):
         self.assertEqual(committed, ["pa"])
         self.assertIn("git link", problems[0])
 
+    def test_an_hfs_dotgit_in_one_folder_does_not_block_pushes(self):
+        """Probe review of #7: planted past the stream filter, a .git that
+        HFS+ would see is refused by git itself, and the refused folder is
+        put back, so the class's pushes go on. The origin checks objects."""
+        git(self.tmp / "origin.git", "config", "receive.fsckObjects", "true")
+        self.write("pa", "pa's notes")
+        planted = self.clone / "memory" / "pb" / ".g\u200cit"
+        planted.mkdir(parents=True)
+        (planted / "config").write_text("x")
+        committed, problems = self.repo.commit(["pa", "pb"], "now")
+        self.assertEqual(committed, ["pa"])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("memory pb: not committed", problems[0])
+        status = subprocess.run(["git", "-C", str(self.clone), "status", "--porcelain"],
+                                capture_output=True, text=True).stdout
+        self.assertEqual(status, "")                     # nothing left to block a rebase
+        self.other_commits("op", "another class")        # forces the pull --rebase path
+        self.assertIsNone(self.repo.push())
+
     def test_rejected_push_rebases_and_retries(self):
         self.other_commits("op", "from the ops class")   # a different heteronym
         self.write("pa", "one")
@@ -325,6 +379,37 @@ class Helper(unittest.TestCase):
             self.repo.collect(FakeIdent("pa"))
         self.assertLess(time.time() - start, 20)
         self.assertEqual(self.saved(), ["saved.md"])
+
+    def test_a_hung_helper_is_killed_as_its_user(self):
+        """Probe review of #7: root without CAP_KILL cannot proc.kill() a
+        helper running as the heteronym; it must kill it as that user."""
+        pidfile = self.tmp / "helper.pid"
+        self.with_helper(f"""
+            import os, sys, time
+            open({str(pidfile)!r}, "w").write(str(os.getpid()))
+            sys.stdout.buffer.write(b"RLMEM2\\n"); sys.stdout.flush()
+            time.sleep(60)
+            """)
+        ident = FakeIdent("pa")
+        ident.as_user = lambda: ["env"]          # a prefix that changes nothing
+        start = time.time()
+        with mock.patch("subprocess.Popen.kill", side_effect=PermissionError(1, "EPERM")):
+            with self.assertRaisesRegex(MemoryError_, "saved copy is unchanged"):
+                self.repo.collect(ident)
+        self.assertLess(time.time() - start, 20)
+        pid = int(pidfile.read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.assertEqual(self.saved(), ["saved.md"])
+
+    def test_the_clone_is_made_private(self):
+        repo = self.tmp / "repo"
+        os.chmod(repo, 0o755)
+        self.repo.secure()
+        self.assertEqual(os.stat(repo).st_mode & 0o777, 0o700)
+        os.chmod(repo, 0o755)
+        self.repo._memory_root()                    # every collect secures it again
+        self.assertEqual(os.stat(repo).st_mode & 0o777, 0o700)
 
     def test_stderr_flood_does_not_wedge(self):
         self.with_helper(f"""
@@ -443,6 +528,35 @@ class RealUsers(unittest.TestCase):
                               env={"PATH": os.environ["PATH"], "PYTHONPATH": src})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual((self.root / "repo" / "memory" / "pa" / "n.md").read_text(), "bounded\n")
+
+    def test_one_heteronym_cannot_read_anothers_memory_in_the_clone(self):
+        """Probe review of #7: a plain `git clone` is 755 with 644 objects."""
+        pa, pb = self.live("pa"), self.live("pb")
+        self.as_user(pa, "sh", "-c", f"echo PA-MEMORY-SECRET > {self.repo.live_dir('pa')}/n.md")
+        self.repo.collect(pa)
+        env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(self.repo.commit(["pa"], "now")[0], ["pa"])
+        peek = subprocess.run([*pb.as_user(), "git", "-c", "safe.directory=*", "-C",
+                               str(self.root / "repo"), "log", "-p", "--all"],
+                              capture_output=True, text=True,
+                              env={"PATH": os.environ["PATH"], "HOME": pb.home})
+        self.assertNotIn("PA-MEMORY-SECRET", peek.stdout)
+        self.assertEqual(os.stat(self.root / "repo").st_mode & 0o777, 0o700)
+
+    def test_backend_scans_the_live_root_and_refuses_a_foreign_clone(self):
+        from relayer.cli import _backend
+        from relayer.runtime import Runtime
+        rt = Runtime(isolation="users", homes=str(self.root / "homes"),
+                     work_root=str(self.root / "work"), memory_repo=str(self.root / "repo"),
+                     memory_live=str(self.root / "live"))
+        backend, problem = _backend(rt, self.root / "state")
+        self.assertIsNone(problem)
+        self.assertEqual(backend.accounts.other_roots, (str(self.root / "live"),))
+        os.chown(self.root / "repo", 12345, 12345)
+        backend, problem = _backend(rt, self.root / "state")
+        self.assertIsNone(backend)
+        self.assertIn("belongs to uid 12345", problem)
 
     def test_restore_fills_only_an_empty_live_folder(self):
         saved = self.root / "repo" / "memory" / "pa"
