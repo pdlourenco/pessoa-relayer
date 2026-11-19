@@ -29,6 +29,12 @@ echo "== claude is installed, on PATH, and runnable by any user"
 run --entrypoint claude "$tag" --version
 run --user 4242:4242 --entrypoint claude "$tag" --version
 
+echo "== the pinned Claude Code offers Remote Control, to an unprivileged user"
+# The connection itself needs a real sign-in and cannot run in CI; SPEC §6.6
+# has the manual check. This catches a version that dropped the flag.
+run --user 4242:4242 -e HOME=/tmp --entrypoint claude "$tag" --help | grep -q -- "--remote-control" \
+  || fail "claude --help does not list --remote-control"
+
 echo "== sessions get a locale and shell; the updater is off"
 # shellcheck disable=SC2016  # expanded inside the container, on purpose
 run --entrypoint sh "$tag" -c 'test "$LANG" = C.UTF-8 && test "$SHELL" = /bin/bash \

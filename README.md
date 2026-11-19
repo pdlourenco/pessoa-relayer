@@ -87,14 +87,18 @@ release workflow). A deployment keeps its compose file, `.env` and
    docker compose up -d
    ```
 
-5. Sign each heteronym in once, interactively, with your own subscription:
+5. Sign each heteronym in once, interactively, with your own subscription.
+   Add it with `enabled: false` so the supervisor leaves it alone, then:
 
    ```bash
    docker compose exec assistants relayer login pa
    ```
 
-   Complete the login, confirm `/status` shows your plan rather than an API
-   key, and exit. The sign-in lives in that heteronym's own home.
+   This runs the heteronym's own session command as its own user. Sign in
+   with `/login`, trust the workspace, accept the Remote Control prompt,
+   confirm `/status` shows your plan rather than an API key, and exit. The
+   sign-in lives in that heteronym's own home. Then set `enabled: true`;
+   docs/SPEC.md §6.6 has the check that Remote Control reaches it.
 
 Network settings (`network_mode`, `networks`) depend on the host: put them
 in a compose override file. The container gets no Docker socket and no
