@@ -1,6 +1,7 @@
 # Example runtime config for Claude Code (docs/SPEC.md §3). Copy and adjust;
 # nothing here names a host.
 version: 1
+class: assistants          # the trust class this container runs (docs/SPEC.md §1.5)
 work_root: /work
 models:
   fast: haiku

@@ -39,13 +39,18 @@ def _common(parser: argparse.ArgumentParser, runtime_required: bool) -> None:
         "--work-root", default=os.environ.get("RELAYER_WORK_ROOT"),
         help="value of {work} (env RELAYER_WORK_ROOT; default: the runtime "
              "config's work_root, else /work, the path inside the container)")
+    parser.add_argument(
+        "--class", dest="klass", default=os.environ.get("RELAYER_CLASS"),
+        help="trust class to load (env RELAYER_CLASS; default: the runtime "
+             "config's class, else every class)")
 
 
 def _load(args: argparse.Namespace):
     runtime = load_runtime(args.runtime) if args.runtime else Runtime()
     work_root = args.work_root or runtime.work_root
     templates = load_templates(args.templates)
-    heteronyms = load_heteronyms(args.heteronyms, templates, work_root)
+    heteronyms = load_heteronyms(args.heteronyms, templates, work_root,
+                                 args.klass or runtime.klass)
     return runtime, templates, heteronyms
 
 
@@ -62,7 +67,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         return 1
     for name, p in sorted(heteronyms.items()):
         state = "enabled" if p.enabled else "disabled"
-        print(f"{name}: template={p.template} tier={p.tier} {state}")
+        print(f"{name}: class={p.klass} template={p.template} tier={p.tier} {state}")
     print(f"ok: {len(heteronyms)} heteronym(s), {len(templates)} template(s)")
     return 0
 

@@ -17,6 +17,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 GOOD = """\
 version: 1
+class: assistants
 models: {fast: h, standard: s, strong: o, frontier: f}
 session:
   command: ["claude", "--model", "{model}", "--settings", "{settings}"]
@@ -112,6 +113,9 @@ class RuntimeConfig(unittest.TestCase):
 
     def test_bad_socket(self):
         self.rejected(GOOD + "tmux_socket: ../x\n", "tmux_socket: must match")
+
+    def test_class_required(self):
+        self.rejected(GOOD.replace("class: assistants\n", ""), "class: required")
 
     def test_unknown_key(self):
         self.rejected(GOOD + "sesion: {}\n", "sesion: unknown key")
