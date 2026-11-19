@@ -8,7 +8,8 @@ from pathlib import Path
 from relayer.config import ConfigError
 from relayer.runtime import Runtime
 from relayer.sessions import Running
-from relayer.supervise import MAX_BACKOFF, ParkStore, Supervisor
+from relayer.supervise import (MAX_BACKOFF, MIN_UPTIME, ParkStore, Supervisor,
+                               check_state_dir, run)
 
 from helpers import persona
 
@@ -141,9 +142,98 @@ class Tick(unittest.TestCase):
         log = self.tick(61 + 332)
         self.assertIn("crash pa: exited after 1s; next start in 60s", log)
 
+    def test_stop_soon_after_start_is_not_a_crash(self):
+        self.tick(0)
+        self.personas["pa"] = dataclasses.replace(self.personas["pa"], enabled=False)
+        self.assertIn("stop pa: disabled", self.tick(10))
+        self.personas["pa"] = dataclasses.replace(self.personas["pa"], enabled=True)
+        log = self.tick(20)
+        self.assertIn("start pa: not running", log)
+        self.assertFalse(any(l.startswith(("crash", "hold")) for l in log))
+
+    def test_park_cleared_when_persona_disabled(self):
+        self.parks.park("pa")
+        self.personas["pa"] = dataclasses.replace(self.personas["pa"], enabled=False)
+        self.tick(0)
+        self.assertEqual(self.parks.names(), set())
+
+    def test_disabled_persona_is_stopped_not_parked(self):
+        self.personas["pa"] = dataclasses.replace(self.personas["pa"], idle_stop=60)
+        self.tick(0)
+        self.personas["pa"] = dataclasses.replace(self.personas["pa"], enabled=False)
+        self.assertIn("stop pa: disabled", self.tick(120))
+        self.assertEqual(self.parks.names(), set())
+
+    def test_exit_at_exactly_min_uptime_is_not_a_crash(self):
+        self.tick(0)
+        self.backend.sessions.clear()
+        log = self.tick(MIN_UPTIME)
+        self.assertFalse(any(l.startswith("crash") for l in log))
+
+    def test_restart_that_dies_counts_as_crash(self):
+        self.tick(0)
+        self.personas["pa"] = dataclasses.replace(self.personas["pa"], tier="strong")
+        self.assertIn("restart pa: configuration changed", self.tick(400))
+        self.backend.sessions.clear()
+        self.assertTrue(any(l.startswith("crash pa") for l in self.tick(401)))
+
+    def test_backoff_survives_huge_crash_counts(self):
+        self.sup.interval = 30.0          # the CLI passes a float: 30.0 * 2**5000 overflows
+        self.tick(0)
+        self.sup.crashes["pa"].count = 5000
+        self.backend.sessions.clear()
+        log = self.tick(1)
+        self.assertIn(f"crash pa: exited after 1s; next start in {MAX_BACKOFF}s", log)
+
+    def test_park_failure_leaves_session_running(self):
+        self.personas["pa"] = dataclasses.replace(self.personas["pa"], idle_stop=60)
+        (self.root / "parked").write_text("a file, not a directory")
+        self.tick(0)
+        log = self.tick(120)
+        self.assertTrue(any(l.startswith("park pa:") for l in log))
+        self.assertIn("pa", self.backend.sessions)
+
     def test_wake_rejects_bad_names(self):
         with self.assertRaises(ValueError):
             self.parks.wake("../etc")
+
+
+
+class Loop(unittest.TestCase):
+    def test_exception_in_a_tick_does_not_end_the_loop(self):
+        import os
+        import signal
+
+        class Flaky:
+            calls = 0
+
+            def tick(self, now):
+                Flaky.calls += 1
+                if Flaky.calls == 1:
+                    raise RuntimeError("boom")
+                os.kill(os.getpid(), signal.SIGTERM)   # second pass: ask to stop
+                return []
+
+        old = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
+        self.addCleanup(signal.signal, signal.SIGTERM, old[0])
+        self.addCleanup(signal.signal, signal.SIGINT, old[1])
+        from unittest import mock
+        with mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+            self.assertEqual(run(Flaky(), 0.01), 0)
+        self.assertEqual(Flaky.calls, 2)
+
+    def test_state_dir_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(check_state_dir(Path(tmp) / "state"))
+            bad = Path(tmp) / "file"
+            bad.write_text("x")
+            self.assertIn("state directory", check_state_dir(bad))
+
+    def test_cli_rejects_non_positive_interval(self):
+        from unittest import mock
+        from relayer.cli import main
+        with mock.patch("sys.stderr"):
+            self.assertEqual(main(["supervise", "--interval", "0"]), 1)
 
 
 if __name__ == "__main__":

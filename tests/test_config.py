@@ -308,6 +308,9 @@ class Rejections(unittest.TestCase):
         self.assertRejected(persona_file("pa: {template: assistant}\n"),
                             "work root", work_root="/w#x")
 
+    def test_deeply_nested_yaml(self):
+        self.assertRejected("version: 1\npersonas: " + "[" * 5000 + "]" * 5000 + "\n", "")
+
     def test_all_errors_reported_together(self):
         ws = Workspace(persona_file("""\
             pa: {template: assistant, tier: frontier}

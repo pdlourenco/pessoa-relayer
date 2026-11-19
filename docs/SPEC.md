@@ -244,23 +244,32 @@ Verified by: `tests/test_tmux.py` (`test_session_inherits_nothing`,
 
 `relayer supervise [--interval 30] [--state DIR]` reconciles (§4) every
 interval, until SIGTERM or SIGINT. It refuses to start (exit 2) under §3.2,
-and exits 1 if the first configuration is invalid.
+and exits 1 if the first configuration is invalid, the interval is not
+positive, or the state directory cannot be created and written. An
+exception in one pass is logged and the loop goes on.
 
 - **Bad edits are survived.** If a later reload fails validation, the
   errors are logged and the last valid configuration stays in force: a typo
   in `personas.yaml` must not stop every session.
 - **Idle stop.** A running, enabled persona with an `idle_stop` is stopped
   once that long has passed since its session's last activity (tmux
-  `session_activity`: output in the pane, a heuristic for "in use"). It is
-  then **parked**: a marker file `DIR/parked/<name>` keeps it stopped,
+  `window_activity`, the last output in the pane: a heuristic for "in use";
+  tmux's `session_activity` only moves with client input). It is then
+  **parked**: a marker file `DIR/parked/<name>` keeps it stopped,
   across supervisor restarts, until `relayer wake <name>` removes the
-  marker. Parks of personas that are removed or disabled are cleared.
+  marker. The marker is written before the stop; if it cannot be written,
+  the session is left running and the failure logged. Parks of personas
+  that are removed or disabled are cleared.
 - **Crash back-off.** A session gone within 60 s of being started counts as
-  a crash. Its next start waits `interval × 2^crashes`, at most 900 s, and
+  a crash. Its next start waits `interval × 2^min(crashes, 10)`, at most
+  900 s, and
   each held start is logged. A session that stays up 300 s clears its count.
   An idle stop or a deliberate stop is never a crash.
-- **Exit leaves sessions running,** so restarting the supervisor does not
-  restart every persona.
+- **The supervisor does not stop sessions on exit.** Outside a container,
+  sessions survive a supervisor restart. In the image, the supervisor runs
+  under tini as the container's main process, so its exit ends the
+  container and every session with it; the container's restart policy then
+  brings everything back.
 - Log lines go to stdout, one per action, with a timestamp.
 
 Verified by: `tests/test_supervise.py`.

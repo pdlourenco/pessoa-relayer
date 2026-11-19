@@ -11,7 +11,7 @@ from .config import ConfigError, load_personas, load_templates
 from .reconcile import apply, plan
 from .runtime import Runtime, check_environment, load_runtime
 from .sessions import SessionError, TmuxBackend
-from .supervise import ParkStore, Supervisor, run
+from .supervise import ParkStore, Supervisor, check_state_dir, run
 
 
 def _state_dir(parser: argparse.ArgumentParser) -> None:
@@ -101,6 +101,13 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     if problems:
         _errors(problems)
         return 2
+    if args.interval <= 0:
+        _errors(["--interval must be greater than 0"])
+        return 1
+    problem = check_state_dir(args.state)
+    if problem:
+        _errors([problem])
+        return 1
     try:
         runtime, _, _ = _load(args)
     except ConfigError as exc:

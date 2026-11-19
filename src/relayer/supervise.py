@@ -32,8 +32,22 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MIN_UPTIME = 60
 STABLE_UPTIME = 300
 MAX_BACKOFF = 900
+MAX_EXPONENT = 10        # 2**10 already exceeds MAX_BACKOFF for any interval >= 1s
 
 Loader = Callable[[], tuple[Runtime, dict[str, Persona]]]
+
+
+def check_state_dir(root: Path) -> str | None:
+    """Create ``root/parked`` if needed; return a problem, or None."""
+    parked = root / "parked"
+    try:
+        parked.mkdir(parents=True, exist_ok=True)
+        probe = parked / ".write-test"
+        probe.touch()
+        probe.unlink()
+    except OSError as exc:
+        return f"state directory {root}: {exc}"
+    return None
 
 
 class ParkStore:
@@ -108,7 +122,8 @@ class Supervisor:
             if crash.started is not None and name not in running:
                 if now - crash.started < MIN_UPTIME:
                     crash.count += 1
-                    wait = min(self.interval * 2 ** crash.count, MAX_BACKOFF)
+                    wait = min(self.interval * 2 ** min(crash.count, MAX_EXPONENT),
+                               MAX_BACKOFF)
                     crash.not_before = now + wait
                     log.append(f"crash {name}: exited after {now - crash.started:.0f}s; "
                                f"next start in {wait:.0f}s")
@@ -129,8 +144,12 @@ class Supervisor:
             p = personas.get(name)
             if (p and p.enabled and p.idle_stop is not None and session.last_activity
                     and now - session.last_activity >= p.idle_stop):
+                try:
+                    self.parks.park(name)   # park first: a stop without a park restarts
+                except OSError as exc:
+                    log.append(f"park {name}: {exc}; not stopping it")
+                    continue
                 idle.append(Action("stop", name, f"idle for {now - session.last_activity:.0f}s"))
-                self.parks.park(name)
                 parked.add(name)
 
         # Parked personas count as disabled, so plan() neither starts them nor
@@ -161,8 +180,9 @@ class Supervisor:
 
 
 def run(supervisor: Supervisor, interval: float) -> int:
-    """Tick until SIGTERM or SIGINT. Sessions are left running on exit, so a
-    supervisor restart does not restart every persona."""
+    """Tick until SIGTERM or SIGINT; an exception in one pass is logged and
+    the loop goes on. The supervisor does not stop sessions on exit (SPEC §5
+    says when they survive it)."""
     stopping = False
 
     def _stop(signum, frame):
@@ -172,11 +192,15 @@ def run(supervisor: Supervisor, interval: float) -> int:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     while not stopping:
-        for line in supervisor.tick(time.time()):
+        try:
+            lines = supervisor.tick(time.time())
+        except Exception as exc:  # noqa: BLE001 - the loop must outlive one bad pass
+            lines = [f"tick failed: {type(exc).__name__}: {exc}"]
+        for line in lines:
             stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             print(f"{stamp} {line}", flush=True)
         deadline = time.monotonic() + interval
         while not stopping and time.monotonic() < deadline:
             time.sleep(min(1.0, deadline - time.monotonic()))
-    print("supervisor: stopping; sessions left running", file=sys.stderr, flush=True)
+    print("supervisor: stopping", file=sys.stderr, flush=True)
     return 0

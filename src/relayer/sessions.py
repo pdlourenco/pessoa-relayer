@@ -24,7 +24,7 @@ _HASH_RE = re.compile(r"^[0-9a-f]{1,64}$")
 class Running:
     name: str
     config_hash: str        # "" if the session carries none
-    last_activity: int      # epoch seconds
+    last_activity: int      # epoch seconds of the last pane output; 0 = unknown
 
 
 class Backend(Protocol):
@@ -54,7 +54,9 @@ class TmuxBackend:
     def list(self) -> dict[str, Running]:
         # "|" not tab: with no locale in its environment, tmux prints a tab
         # as "_". Names, hashes and timestamps cannot contain "|".
-        fmt = "#{session_name}|#{" + HASH_OPTION + "}|#{session_activity}"
+        # window_activity, not session_activity: in tmux 3.4 the latter only
+        # moves with client input, so a detached session never updates it.
+        fmt = "#{session_name}|#{" + HASH_OPTION + "}|#{window_activity}"
         proc = self._run("list-sessions", "-F", fmt, check=False)
         if proc.returncode != 0:
             # No server on our socket means no sessions; anything else is real.
