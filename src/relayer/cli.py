@@ -43,7 +43,7 @@ def _load(args: argparse.Namespace):
     work_root = args.work_root or runtime.work_root
     templates = load_templates(args.templates)
     heteronyms = load_heteronyms(args.heteronyms, templates, work_root,
-                                 args.klass)
+                                 args.klass or runtime.klass)
     return runtime, templates, heteronyms
 
 

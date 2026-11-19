@@ -91,8 +91,8 @@ Verified by: `tests/test_config.py::ValidHeteronym::test_hash_changes_with_shape
 
 Heteronyms with the same tools and credentials form a **trust class**, and
 each class runs in its own container from the same image. A container loads
-only its class (`--class` or `RELAYER_CLASS`; the runtime config's `class`
-once it exists). Entries of other classes are skipped without being
+only its class: `class` in `relayer.yaml` (§3), which `--class` or
+`RELAYER_CLASS` override. Entries of other classes are skipped without being
 validated: their errors belong to the container that runs them.
 
 A heteronym's template must list its class in `classes` (§2), so a template
@@ -171,6 +171,7 @@ Code starting point; nothing in it names a host.
 
 ```yaml
 version: 1                      # required
+class: <trust class>            # required: the class this container runs (§1.5)
 work_root: <absolute path>      # default /work; --work-root or RELAYER_WORK_ROOT override it
 models:                         # required: one model for every tier
   fast: <model>
