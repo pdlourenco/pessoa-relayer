@@ -66,7 +66,7 @@ def apply(actions: list[Action], desired: dict[str, Persona], backend: Backend,
                 workdir = persona.folders[0]
                 os.makedirs(workdir, exist_ok=True)
                 backend.start(action.name, runtime.session_command(persona, environ),
-                              workdir, runtime.session_hash(persona, environ))
+                              workdir, runtime.session_hash(persona))
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             errors.append(f"{action}: failed: {exc}")
     return errors

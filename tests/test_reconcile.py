@@ -87,13 +87,21 @@ class Apply(unittest.TestCase):
         self.assertIn("TERM=xterm", words)
         self.assertNotIn("GH_TOKEN=secret", words)
         self.assertEqual((name, workdir, h),
-                         ("pa", f"{self.tmp.name}/pa", self.runtime.session_hash(pa, self.ENV)))
+                         ("pa", f"{self.tmp.name}/pa", self.runtime.session_hash(pa)))
 
     def test_restart_stops_then_starts(self):
         pa = persona(folder=f"{self.tmp.name}/pa")
         backend = FakeBackend()
         apply([Action("restart", "pa", "")], {"pa": pa}, backend, self.runtime, self.ENV)
         self.assertEqual([c[0] for c in backend.calls], ["stop", "start"])
+
+    def test_missing_path_is_reported_not_started(self):
+        pa = persona(folder=f"{self.tmp.name}/pa")
+        backend = FakeBackend()
+        errors = apply([Action("start", "pa", "")], {"pa": pa}, backend, self.runtime,
+                       {"HOME": "/h"})
+        self.assertIn("PATH is not set", errors[0])
+        self.assertEqual(backend.calls, [])
 
     def test_one_failure_does_not_block_others(self):
         a = persona("a", folder=f"{self.tmp.name}/a")

@@ -206,9 +206,14 @@ failed action is reported and does not stop the others. Before a start, the
 persona's first folder is created if missing. The runtime only manages
 sessions on its own tmux socket.
 
-The **session hash** covers the persona hash (§1.4) and the full launch
-command, environment included, so editing `relayer.yaml` (a model mapping,
-the command, `env`) restarts the sessions it affects. Each session carries
+The **session hash** covers the persona hash (§1.4), the persona's model,
+the command template, the literal `env` and the names in `pass_env`, so
+editing `relayer.yaml` restarts the sessions it affects. It never covers the
+values of inherited variables: a reconcile run from a shell with a different
+`PATH` must not restart every session.
+
+A session name on the socket that is not a valid persona name makes the
+reconcile stop with an error rather than guess (fail closed). Each session carries
 its hash in the tmux user option `@relayer_hash`.
 
 Verified by: `tests/test_reconcile.py`, `tests/test_runtime.py`
@@ -219,9 +224,11 @@ tmux; CI installs it).
 
 - The session command is one shell-quoted string,
   `env -i <NAME=value …> <argv …>`. A session's environment is exactly
-  `HOME`, `PATH` and `LANG` from the supervisor, `TERM=screen-256color`,
-  `pass_env`, then `env`; it inherits nothing from the tmux server or
-  whichever process started it.
+  `HOME`, `PATH`, `LANG`, `USER` and `SHELL` from the supervisor (when set),
+  `TERM=screen-256color`, `pass_env`, then `env`; it inherits nothing from
+  the tmux server or whichever process started it. `PATH` must end up set,
+  or the start is reported as failed: `env -i` would otherwise fall back to
+  a libc default and the agent binary would not be found.
 - tmux runs with `-f /dev/null` (no user config) and a minimal environment.
 - The start directory has `#` doubled, as a second guard behind §1.1's
   character set.

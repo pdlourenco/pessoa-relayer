@@ -74,7 +74,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     backend = TmuxBackend(runtime.tmux_socket)
     try:
         actions = plan(personas, backend.list(),
-                       lambda p: runtime.session_hash(p, environ))
+                       runtime.session_hash)
     except SessionError as exc:
         _errors([str(exc)])
         return 1

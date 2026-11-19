@@ -76,6 +76,13 @@ class RuntimeConfig(unittest.TestCase):
         self.assertEqual(env, {"HOME": "/h", "PATH": "/p", "TERM": "screen-256color",
                                "KEEP": "k", "LIT": "v"})
 
+    def test_path_is_required(self):
+        rt = self.load(GOOD)
+        with self.assertRaisesRegex(ValueError, "PATH is not set"):
+            rt.session_env({"HOME": "/h"})
+        rt = self.load(GOOD + "  env: {PATH: /opt/bin}\n")
+        self.assertEqual(rt.session_env({})["PATH"], "/opt/bin")
+
     def test_command_is_shell_safe(self):
         # A trailing ";" in an argument must stay inside quotes: tmux treats a
         # bare trailing ";" as a command separator.
@@ -92,10 +99,16 @@ class RuntimeConfig(unittest.TestCase):
         a = self.load(GOOD)
         b = self.load(GOOD.replace("strong: o", "strong: o2").replace("standard: s", "standard: s2"))
         c = self.load(GOOD + "  env: {X: '1'}\n")
-        env = {"PATH": "/p"}
-        self.assertNotEqual(a.session_hash(p, env), b.session_hash(p, env))
-        self.assertNotEqual(a.session_hash(p, env), c.session_hash(p, env))
-        self.assertEqual(a.session_hash(p, env), a.session_hash(p, dict(env)))
+        d = self.load(GOOD + "  pass_env: [KEEP]\n")
+        self.assertNotEqual(a.session_hash(p), b.session_hash(p))
+        self.assertNotEqual(a.session_hash(p), c.session_hash(p))
+        self.assertNotEqual(a.session_hash(p), d.session_hash(p))
+
+    def test_session_hash_ignores_inherited_values(self):
+        # Hashing PATH's value would restart every session whenever a
+        # reconcile ran from a different shell.
+        import inspect
+        self.assertNotIn("environ", inspect.signature(self.load(GOOD).session_hash).parameters)
 
     def test_bad_socket(self):
         self.rejected(GOOD + "tmux_socket: ../x\n", "tmux_socket: must match")

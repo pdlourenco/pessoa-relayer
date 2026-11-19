@@ -29,6 +29,8 @@ FORBIDDEN_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
                  "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_TERM = "screen-256color"
+# Always passed through when set: what any login session expects.
+BASE_ENV = ("HOME", "PATH", "LANG", "USER", "SHELL")
 
 
 @dataclass(frozen=True)
@@ -42,10 +44,15 @@ class Runtime:
 
     def session_env(self, environ: dict[str, str]) -> dict[str, str]:
         """The whole environment a session gets; nothing else is inherited."""
-        env = {k: environ[k] for k in ("HOME", "PATH", "LANG") if k in environ}
+        env = {k: environ[k] for k in BASE_ENV if k in environ}
         env["TERM"] = DEFAULT_TERM
         env.update({k: environ[k] for k in self.pass_env if k in environ})
         env.update(self.env)
+        if not env.get("PATH"):
+            # env -i would fall back to a libc default PATH, the agent binary
+            # would not be found, and the session would die unreported.
+            raise ValueError("PATH is not set; set it in the supervisor's "
+                             "environment or in relayer.yaml session.env")
         return env
 
     def session_command(self, persona: Persona, environ: dict[str, str]) -> str:
@@ -58,9 +65,19 @@ class Runtime:
         assignments = [f"{k}={v}" for k, v in sorted(self.session_env(environ).items())]
         return shlex.join(["env", "-i", *assignments, *self.session_argv(persona)])
 
-    def session_hash(self, persona: Persona, environ: dict[str, str]) -> str:
-        """Hash of everything that shapes the running session (SPEC §4)."""
-        blob = persona.config_hash() + "\0" + self.session_command(persona, environ)
+    def session_hash(self, persona: Persona) -> str:
+        """Hash of the configuration that shapes the session (SPEC §4).
+
+        It covers the persona hash, the model, the command template, the
+        literal ``env`` and the *names* in ``pass_env``, never the values of
+        inherited variables: a reconcile run from a shell whose PATH differs
+        from the supervisor's must not restart every session.
+        """
+        shape = {"persona": persona.config_hash(), "model": self.models[persona.tier],
+                 "command": list(self.command), "env": self.env,
+                 "pass_env": list(self.pass_env), "base": list(BASE_ENV),
+                 "term": DEFAULT_TERM}
+        blob = json.dumps(shape, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
     def session_argv(self, persona: Persona) -> list[str]:
