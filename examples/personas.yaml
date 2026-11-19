@@ -1,0 +1,17 @@
+# Example personas.yaml. Copy it next to your deployment and replace the chat
+# identifiers; nothing here is specific to one host (docs/SPEC.md §1).
+version: 1
+personas:
+  pa:
+    template: assistant
+    channel:
+      kind: signal
+      chat: "group.REPLACE-WITH-GROUP-ID"
+  dev-example:
+    template: developer
+    tier: strong
+    folders: ["{work}/dev-example"]
+    channel:
+      kind: signal
+      chat: "group.REPLACE-WITH-ANOTHER-GROUP-ID"
+    enabled: false

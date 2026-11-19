@@ -1,0 +1,14 @@
+# A development orchestrator for one repository. It gets repository write
+# access and a forge token, so it is never created from chat: add it by
+# editing personas.yaml (docs/SPEC.md §2.2).
+version: 1
+description: Development orchestrator for one repository.
+max_tier: frontier
+default_tier: strong
+folders: ["{work}/{name}"]
+permissions:
+  allow: [Read, Edit, Write, Grep, Glob, "Bash(git:*)", "Bash(make test:*)"]
+  deny: ["Bash(rm -rf:*)", "Bash(curl:*)"]
+channel_kinds: [signal, telegram]
+idle_stop: 8h
+chat_creatable: false
