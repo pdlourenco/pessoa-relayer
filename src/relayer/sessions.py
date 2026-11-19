@@ -115,6 +115,14 @@ class TmuxBackend:
         self._run("kill-session", "-t", f"={name}")
 
 
+def _cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
+    except OSError:
+        return "?"
+
+
 class UserTmuxBackend:
     """One tmux server per heteronym, each owned by that heteronym's user.
 
@@ -170,10 +178,15 @@ class UserTmuxBackend:
             pass                          # already gone, or hidden: the kill below covers it
         # kill-session ends the tmux session, not a daemon the heteronym
         # started with setsid; end everything its uid runs (docs/SPEC.md §6.3).
-        subprocess.run([*ident.as_user(), "kill", "-KILL", "-1"], capture_output=True)
+        # kill(-1) walks the process table once, so a process forking during
+        # the walk can leave a child it missed: repeat until none is left.
         deadline = time.time() + 5
         while processes_of(ident.uid) and time.time() < deadline:
-            time.sleep(0.05)
-        if processes_of(ident.uid):
-            raise SessionError(f"processes of {ident.user} survived the stop")
+            subprocess.run([*ident.as_user(), "kill", "-s", "KILL", "--", "-1"],
+                           capture_output=True)
+            time.sleep(0.1)
+        left = processes_of(ident.uid)
+        if left:
+            raise SessionError(f"processes of {ident.user} survived the stop: "
+                               + "; ".join(f"{p} {_cmdline(p)}" for p in left))
 
