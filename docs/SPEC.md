@@ -430,18 +430,22 @@ live folder:
   files it can see, then an end marker; the supervisor writes them into a
   staging directory. The stream is treated as hostile, since the
   heteronym's own session can tamper with a same-uid helper:
-  - a path that is absolute, contains `..`, is not normalised, or has a
-    git-like component anywhere (`.git` and every `.git*` name, any case,
-    with trailing dots or spaces, or `git~N`) ends the copy;
+  - a path that is absolute, contains `..` or `:`, is not normalised, is
+    deeper than 32 components, or has a git-like component anywhere
+    (`.git` and every `.git*` name, any case, with trailing dots or spaces,
+    or anything starting `git~N`) ends the copy;
   - symlinks are never followed and git-like names are skipped by the
     helper, so a heteronym's own odd files never block its memory;
-  - limits: 5 MB a file (skipped and logged), 50 MB and 10 000 files a
-    heteronym, names counted;
+  - limits: 5 MB a file (skipped and logged), 50 MB, 10 000 files and
+    10 000 directories a heteronym, names counted;
   - the staging directory replaces the saved copy only after the end
     marker arrived and the helper exited cleanly; otherwise the saved copy
     is unchanged;
-  - the helper runs under a watchdog (120 s) with its stderr going to a
-    file, so a stopped, hung or chatty helper cannot wedge the supervisor;
+  - the whole transfer has one 120 s deadline: every read and write on the
+    helper's pipes waits only until it (a session holding a copy of a pipe
+    can withhold EOF forever), the helper is killed when it passes, and
+    stderr is drained by a thread that keeps at most 64 KB, so a stopped,
+    hung or chatty helper cannot wedge the supervisor;
     it starts in `/` with `python -P`, so no module in its working
     directory can replace ours;
   - neither `<repo>/memory` nor `<repo>/memory/<name>` may be a symlink.

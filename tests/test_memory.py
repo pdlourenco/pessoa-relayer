@@ -80,7 +80,8 @@ class Stream(unittest.TestCase):
     def test_unsafe_paths_are_rejected(self):
         for bad in ("../escape", "/etc/passwd", "a/../../b", ".git/hooks/post-commit", "",
                     "sub/.git/config", "a/.GIT/x", ".git./x", "GIT~1/x", "a/.gitattributes",
-                    "b/.gitmodules", ".git /x", "a//b", "a\\b"):
+                    "b/.gitmodules", ".git /x", "a//b", "a\\b", "git~1:a/x",
+                    "GIT~1 :a/x", "a:b", "/".join(["d"] * 33)):
             with self.subTest(bad=bad):
                 dest = self.tmp / f"dest{abs(hash(bad))}"
                 with self.assertRaises(MemoryError_):
@@ -115,6 +116,16 @@ class Stream(unittest.TestCase):
         skipped = self.roundtrip(src, dest)
         self.assertEqual(sorted(p.name for p in dest.rglob("*")), ["notes.md"])
         self.assertEqual(len(skipped), 2)
+
+    def test_directory_count_limit(self):
+        from relayer import memory
+        stream = MAGIC + b"".join(record(f"d{i}/f", b"") for i in range(5)) + END
+        old = memory.MAX_DIRS
+        memory.MAX_DIRS = 3
+        self.addCleanup(setattr, memory, "MAX_DIRS", old)
+        with self.assertRaises(MemoryError_):
+            receive(io.BytesIO(stream), self.tmp / "dirs")
+        self.assertFalse((self.tmp / "dirs").exists())
 
     def test_file_count_limit(self):
         src, dest = self.tmp / "src", self.tmp / "dest"
@@ -317,6 +328,22 @@ class Helper(unittest.TestCase):
             """)
         self.repo.collect(FakeIdent("pa"))
         self.assertEqual(self.saved(), [])
+
+    def test_a_held_pipe_cannot_outlast_the_deadline(self):
+        """The heteronym's session can hold a copy of the helper's stdout, so
+        killing the helper never brings EOF. Here a grandchild holds it."""
+        self.with_helper("""
+            import subprocess, sys, time
+            subprocess.Popen(["sleep", "30"])          # inherits stdout and keeps it open
+            sys.stdout.buffer.write(b"RLMEM2\\n"); sys.stdout.flush()
+            time.sleep(30)
+            """)
+        start = time.time()
+        with self.assertRaises(MemoryError_):
+            self.repo.collect(FakeIdent("pa"))
+        self.assertLess(time.time() - start, 10)
+        self.assertEqual(self.saved(), ["saved.md"])
+        subprocess.run(["pkill", "-f", "^sleep 30$"], capture_output=True)
 
     def test_symlinked_folders_in_the_clone_are_refused(self):
         secret = self.tmp / "secret"

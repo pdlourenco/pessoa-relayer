@@ -36,8 +36,9 @@ import stat
 import struct
 import subprocess
 import sys
-import tempfile
+import select
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterator
@@ -52,7 +53,9 @@ _END = _HEADER.pack(0, 0)           # end marker: a record with an empty path
 # Any component git could treat as its own: .git and every .git* name
 # (.gitattributes, .gitmodules, ...), in any case, with the trailing dots or
 # spaces some filesystems drop, and the 8.3 short name "git~1".
-_GITLIKE = re.compile(r"^(\.git.*|git~\d+)$", re.IGNORECASE)
+_GITLIKE = re.compile(r"^(\.git.*|git~\d+.*)$", re.IGNORECASE)
+MAX_DEPTH = 32                      # path components in one memory path
+MAX_DIRS = 10_000                   # directories in one heteronym's memory
 _GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
              "-c", "submodule.recurse=false")
 
@@ -70,6 +73,7 @@ def _safe_rel(path: str) -> str:
     p = PurePosixPath(path)
     if (p.is_absolute() or not p.parts or any(x in ("", ".", "..") for x in p.parts)
             or any(_gitlike(x) for x in p.parts) or "\0" in path or "\\" in path
+            or ":" in path or len(p.parts) > MAX_DEPTH
             or len(path.encode()) > 4096 or str(p) != path):
         raise MemoryError_(f"unsafe path in memory stream: {path!r}")
     return path
@@ -147,6 +151,7 @@ def receive(stream: BinaryIO, staging: Path, max_total: int = MAX_TOTAL,
         raise MemoryError_("not a memory stream")
     staging.mkdir(mode=0o700)
     count = total = 0
+    dirs: set[str] = set()
     try:
         while True:
             head = stream.read(_HEADER.size)
@@ -169,6 +174,10 @@ def receive(stream: BinaryIO, staging: Path, max_total: int = MAX_TOTAL,
             if len(data) != data_len:
                 raise MemoryError_("truncated memory stream")
             target = staging / rel
+            parents = PurePosixPath(rel).parents
+            dirs.update(str(d) for d in parents if str(d) != ".")
+            if len(dirs) > MAX_DIRS:
+                raise MemoryError_("memory stream has too many directories")
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "wb") as fh:
@@ -198,6 +207,75 @@ def load(stream: BinaryIO, dest: Path, max_total: int = MAX_TOTAL) -> int:
     count = receive(stream, staging, max_total)
     replace(staging, dest)
     return count
+
+
+# --- deadline-bounded pipe ends -----------------------------------------------
+
+class _DeadlineReader:
+    """``read(n)`` on a pipe that gives up at a deadline.
+
+    Killing a helper does not close its stdout if the heteronym's session
+    holds a copy of the descriptor (pidfd_getfd), so EOF may never come;
+    every read waits only until the one deadline for the whole transfer.
+    """
+
+    def __init__(self, fd: int, deadline: float):
+        self.fd, self.deadline = fd, deadline
+        os.set_blocking(fd, False)
+
+    def read(self, n: int) -> bytes:
+        chunks, want = [], n
+        while want > 0:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise MemoryError_("memory helper timed out")
+            ready, _, _ = select.select([self.fd], [], [], remaining)
+            if not ready:
+                continue
+            chunk = os.read(self.fd, min(want, 1 << 16))
+            if not chunk:
+                break                       # EOF
+            chunks.append(chunk)
+            want -= len(chunk)
+        return b"".join(chunks)
+
+
+class _DeadlineWriter:
+    """``write``/``flush`` on a pipe that gives up at a deadline."""
+
+    def __init__(self, fd: int, deadline: float):
+        self.fd, self.deadline = fd, deadline
+        os.set_blocking(fd, False)
+
+    def write(self, data: bytes) -> int:
+        view = memoryview(data)
+        while view:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise MemoryError_("memory helper timed out")
+            _, ready, _ = select.select([], [self.fd], [], remaining)
+            if ready:
+                view = view[os.write(self.fd, view[: 1 << 16]):]
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+
+def _drain_capped(fd: int, keep: list[bytes], cap: int = 64 * 1024) -> None:
+    """Read a pipe to EOF, keeping at most ``cap`` bytes: a helper (or a
+    session holding its stderr) can write without limit and fill nothing."""
+    kept = 0
+    while True:
+        try:
+            chunk = os.read(fd, 1 << 16)
+        except OSError:
+            return
+        if not chunk:
+            return
+        if kept < cap:
+            keep.append(chunk[: cap - kept])
+            kept += len(keep[-1])
 
 
 # --- the supervisor's side ----------------------------------------------------
@@ -242,44 +320,47 @@ class MemoryRepo:
         return {k: os.environ[k] for k in ("PATH", "PYTHONPATH", "LANG") if k in os.environ}
 
     def _run_helper(self, argv: list[str], feed=None, drain=None) -> tuple[int, str]:
-        """Run a helper under a watchdog that kills it after ``timeout``.
+        """Run a helper with one deadline for everything.
 
-        ``drain(stdout)`` or ``feed(stdin)`` runs in this thread; stderr goes
-        to a file, so a helper writing a lot of it can never fill a pipe and
-        wedge either side, and a stopped or hung helper is killed.
+        ``drain(reader)`` or ``feed(writer)`` runs in this thread on pipe ends
+        that give up at the deadline (a held descriptor copy can withhold
+        EOF forever); stderr is drained by a thread that keeps at most 64 KB.
+        The helper is killed when the deadline passes.
         """
-        with tempfile.TemporaryFile() as err:
-            proc = subprocess.Popen(argv, stdin=subprocess.PIPE if feed else subprocess.DEVNULL,
-                                    stdout=subprocess.PIPE if drain else subprocess.DEVNULL,
-                                    stderr=err, env=self._helper_env(), cwd="/")
-            timer = threading.Timer(self.timeout, proc.kill)
-            timer.start()
-            try:
-                if drain:
-                    drain(proc.stdout)
-                else:
+        deadline = time.monotonic() + self.timeout
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE if feed else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE if drain else subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, env=self._helper_env(), cwd="/")
+        kept: list[bytes] = []
+        threading.Thread(target=_drain_capped, args=(proc.stderr.fileno(), kept),
+                         daemon=True).start()
+        try:
+            if drain:
+                drain(_DeadlineReader(proc.stdout.fileno(), deadline))
+            else:
+                try:
+                    feed(_DeadlineWriter(proc.stdin.fileno(), deadline))
+                except BrokenPipeError:
+                    pass
+                proc.stdin.close()              # EOF: the helper checks nothing follows
+            code = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise MemoryError_("memory helper timed out") from None
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            for pipe in (proc.stdin, proc.stdout):
+                if pipe:
                     try:
-                        feed(proc.stdin)
-                        proc.stdin.close()      # EOF: the helper checks nothing follows
-                    except BrokenPipeError:
+                        pipe.close()
+                    except OSError:
                         pass
-                code = proc.wait()
-            except BaseException:
-                proc.kill()
-                proc.wait()
-                raise
-            finally:
-                timer.cancel()
-                for pipe in (proc.stdin, proc.stdout):
-                    if pipe:
-                        try:
-                            pipe.close()
-                        except BrokenPipeError:
-                            pass
-            size = err.seek(0, os.SEEK_END)
-            err.seek(max(0, size - 64 * 1024))
-            text = err.read().decode(errors="replace").strip()
-        return code, text
+        time.sleep(0.05)                        # let the stderr thread catch up
+        return code, b"".join(kept).decode(errors="replace").strip()
 
     def collect(self, ident) -> list[str]:
         """Copy one heteronym's live folder into the clone; return notes."""
