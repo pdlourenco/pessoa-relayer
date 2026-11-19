@@ -487,6 +487,8 @@ The clone's `.git` holds every heteronym's memory, so the clone must be
 root's alone. At start and before every collect, the supervisor opens
 `repo` without following a symlink: owned by anyone but root, it refuses
 to start; readable or enterable by anyone else, it sets it to mode 700. A
+`repo/.git` that is a symlink, which would keep the objects outside the
+private directory, is refused. A
 plain `git clone` on the host makes it 755 with 644 objects, and the bind
 mount hides the image's own `chmod`. The credential root pushes with must
 not be readable by any heteronym either.
@@ -505,8 +507,10 @@ live folder:
   - a path that is absolute, contains `..` or `:`, is not normalised, is
     deeper than 32 components, or has a git-like component anywhere
     (`.git` and every `.git*` name, any case, with trailing dots or spaces,
-    or anything starting `git~N`, all checked after removing Unicode format
-    characters such as U+200C, which HFS+ ignores) ends the copy, as does a
+    or any name with an NTFS short-name tail `~<digit>`, which git can read
+    as `.git`, `.gitmodules` or `.gitattributes`, such as `gitmod~1`; all
+    checked after removing Unicode format characters such as U+200C, which
+    HFS+ ignores) ends the copy, as does a
     name the staging directory cannot hold (repeated, a file and a
     directory of one name, too long);
   - symlinks are never followed and git-like names are skipped by the
@@ -518,8 +522,9 @@ live folder:
     is unchanged;
   - the whole transfer has one 120 s deadline: every read and write on the
     helper's pipes waits only until it (a session holding a copy of a pipe
-    can withhold EOF forever), the helper is killed when it passes (as its
-    user: root holds no `CAP_KILL`), and
+    can withhold EOF forever), the helper is killed when it passes (from
+    outside the heteronym's reach, as in §6.3: root holds no `CAP_KILL`),
+    and
     stderr is drained by a thread that keeps at most 64 KB, so a stopped,
     hung or chatty helper cannot wedge the supervisor;
     it starts in `/` with `python -P`, so no module in its working

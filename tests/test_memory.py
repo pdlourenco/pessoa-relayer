@@ -108,6 +108,16 @@ class Stream(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in dest.rglob("*")), ["notes.md"])
         self.assertEqual(len(skipped), 1)
 
+    def test_ntfs_short_names_git_reads_as_its_own_are_rejected(self):
+        """Second review of #7: git reads these as .gitmodules or
+        .gitattributes, and a fsck'ing origin rejects bad ones."""
+        for bad in ("gitmod~1", "a/gi7eba~1", "GITATT~1", "gi7d29~1", "x~9y"):
+            with self.subTest(bad=bad):
+                dest = self.tmp / f"dest{abs(hash(bad))}"
+                with self.assertRaises(MemoryError_):
+                    load(io.BytesIO(MAGIC + record(bad, b"x") + END), dest)
+                self.assertFalse(dest.exists())
+
     def test_conflicting_or_overlong_names_are_memory_errors(self):
         """Probe review of #7 (minor): each was an OSError, not MemoryError_."""
         cases = {
@@ -300,6 +310,25 @@ class Git(unittest.TestCase):
         self.other_commits("op", "another class")        # forces the pull --rebase path
         self.assertIsNone(self.repo.push())
 
+    def test_a_short_name_gitmodules_in_live_memory_does_not_block_pushes(self):
+        """Second review of #7, end to end with the real helper: gitmod~1 in
+        a heteronym's live folder must never reach a fsck'ing origin."""
+        git(self.tmp / "origin.git", "config", "receive.fsckObjects", "true")
+        live = self.tmp / "live" / "pa"
+        live.mkdir(parents=True)
+        (live / "notes.md").write_text("kept")
+        (live / "gitmod~1").write_text('[submodule "../../x"]\n\tpath = x\n\turl = -u\n')
+        (live / "gitatt~1").write_text("*" + " x" * 1600 + "\n")
+        src = str(Path(__file__).resolve().parent.parent / "src")   # the helper starts in /
+        with mock.patch.dict(os.environ, {"PYTHONPATH": src}):
+            notes = self.repo.collect(FakeIdent("pa"))
+        self.assertEqual(len(notes), 2)                  # both skipped, and said so
+        self.assertEqual(self.repo.commit(["pa"], "now"), (["pa"], []))
+        self.assertIsNone(self.repo.push())
+        self.write("pa", "a later change")
+        self.repo.commit(["pa"], "later")
+        self.assertIsNone(self.repo.push())              # and pushes keep working
+
     def test_rejected_push_rebases_and_retries(self):
         self.other_commits("op", "from the ops class")   # a different heteronym
         self.write("pa", "one")
@@ -329,9 +358,18 @@ class FakeIdent:
 
     def __init__(self, name):
         self.name = name
+        self.killed = []
 
     def as_user(self):
         return []
+
+    def kill(self, pids):
+        self.killed.extend(pids)
+        for pid in pids:
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
 
 
 class Helper(unittest.TestCase):
@@ -391,13 +429,13 @@ class Helper(unittest.TestCase):
             time.sleep(60)
             """)
         ident = FakeIdent("pa")
-        ident.as_user = lambda: ["env"]          # a prefix that changes nothing
         start = time.time()
         with mock.patch("subprocess.Popen.kill", side_effect=PermissionError(1, "EPERM")):
             with self.assertRaisesRegex(MemoryError_, "saved copy is unchanged"):
                 self.repo.collect(ident)
         self.assertLess(time.time() - start, 20)
         pid = int(pidfile.read_text())
+        self.assertEqual(ident.killed, [pid])           # through the identity's kill
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
         self.assertEqual(self.saved(), ["saved.md"])
@@ -553,6 +591,21 @@ class RealUsers(unittest.TestCase):
         backend, problem = _backend(rt, self.root / "state")
         self.assertIsNone(problem)
         self.assertEqual(backend.accounts.other_roots, (str(self.root / "live"),))
+        # Without a memory section, folders left in the live root still count.
+        no_memory = Runtime(isolation="users", homes=str(self.root / "homes"),
+                            work_root=str(self.root / "work"),
+                            memory_live=str(self.root / "live"))
+        backend, problem = _backend(no_memory, self.root / "state")
+        self.assertEqual(backend.accounts.other_roots, (str(self.root / "live"),))
+        # A .git elsewhere would keep the objects out of the private clone.
+        dotgit = self.root / "repo" / ".git"
+        os.rename(dotgit, self.root / "gitdir")
+        os.symlink(self.root / "gitdir", dotgit)
+        backend, problem = _backend(rt, self.root / "state")
+        self.assertIsNone(backend)
+        self.assertIn("not a git clone", problem)
+        os.unlink(dotgit)
+        os.rename(self.root / "gitdir", dotgit)
         os.chown(self.root / "repo", 12345, 12345)
         backend, problem = _backend(rt, self.root / "state")
         self.assertIsNone(backend)

@@ -53,10 +53,12 @@ _HEADER = struct.Struct(">HQ")      # path length, data length
 _END = _HEADER.pack(0, 0)           # end marker: a record with an empty path
 # Any component git could treat as its own: .git and every .git* name
 # (.gitattributes, .gitmodules, ...), in any case, with the trailing dots or
-# spaces some filesystems drop, and the 8.3 short name "git~1". Checked after
-# removing Unicode format characters (category Cf), which HFS+ ignores:
-# ".g\u200cit" is ".git" there, and git's fsck rejects it (hasDotgit).
-_GITLIKE = re.compile(r"^(\.git.*|git~\d+.*)$", re.IGNORECASE)
+# spaces some filesystems drop, and anything with an NTFS 8.3 short-name
+# tail "~<digit>": git reads "git~1" as .git and "gitmod~1" or "gi7eba~1" as
+# .gitmodules, and its fsck rejects bad ones. Checked after removing Unicode
+# format characters (category Cf), which HFS+ ignores: ".g\u200cit" is
+# ".git" there, and git's fsck rejects it (hasDotgit).
+_GITLIKE = re.compile(r"^(\.git.*|.*~\d.*)$", re.IGNORECASE)
 MAX_DEPTH = 32                      # path components in one memory path
 MAX_DIRS = 10_000                   # directories in one heteronym's memory
 _GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
@@ -360,15 +362,16 @@ class MemoryRepo:
         # supervisor's (git credentials, for one).
         return {k: os.environ[k] for k in ("PATH", "PYTHONPATH", "LANG") if k in os.environ}
 
-    def _run_helper(self, argv: list[str], as_user: list[str], feed=None,
+    def _run_helper(self, argv: list[str], kill, feed=None,
                     drain=None) -> tuple[int, str]:
         """Run a helper with one deadline for everything.
 
         ``drain(reader)`` or ``feed(writer)`` runs in this thread on pipe ends
         that give up at the deadline (a held descriptor copy can withhold
         EOF forever); stderr is drained by a thread that keeps at most 64 KB.
-        The helper is killed when the deadline passes, as the user it runs
-        as: root here holds no CAP_KILL, so ``proc.kill()`` would fail.
+        The helper is killed when the deadline passes with ``kill(pids)``
+        (``Identity.kill``): root here holds no CAP_KILL, so ``proc.kill()``
+        would fail, and a kill run as the heteronym could be stopped by it.
         """
         deadline = time.monotonic() + self.timeout
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE if feed else subprocess.DEVNULL,
@@ -388,10 +391,10 @@ class MemoryRepo:
                 proc.stdin.close()              # EOF: the helper checks nothing follows
             code = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            _kill(proc, as_user)
+            _kill(proc, kill)
             raise MemoryError_("memory helper timed out") from None
         except BaseException:
-            _kill(proc, as_user)
+            _kill(proc, kill)
             raise
         finally:
             for pipe in (proc.stdin, proc.stdout):
@@ -416,7 +419,7 @@ class MemoryRepo:
 
         try:
             code, err = self._run_helper(
-                self._helper(ident, "dump", self.live_dir(ident.name)), ident.as_user(),
+                self._helper(ident, "dump", self.live_dir(ident.name)), ident.kill,
                 drain=drain)
         except MemoryError_ as exc:
             raise MemoryError_(f"memory of {ident.name} not copied; the saved copy is "
@@ -439,7 +442,7 @@ class MemoryRepo:
             dump(src, stdin)
 
         code, err = self._run_helper(
-            self._helper(ident, "load-if-empty", self.live_dir(ident.name)), ident.as_user(),
+            self._helper(ident, "load-if-empty", self.live_dir(ident.name)), ident.kill,
             feed=feed)
         if code != 0:
             raise MemoryError_(f"restore for {ident.name} failed (exit {code}): {err[-500:]}")
@@ -515,15 +518,12 @@ class MemoryRepo:
         return None
 
 
-def _kill(proc: subprocess.Popen, as_user: list[str]) -> None:
-    """Kill a helper as the user it runs as, then reap it."""
+def _kill(proc: subprocess.Popen, kill) -> None:
+    """Kill a helper with ``kill([pid])``, then reap it."""
     if proc.poll() is None:
-        if as_user:
-            # Until it is reaped, the pid cannot be reused: this signals
-            # the helper or nothing.
-            subprocess.run([*as_user, "kill", "-9", str(proc.pid)], capture_output=True)
-        else:
-            proc.kill()
+        # Until it is reaped, the pid cannot be reused: this signals the
+        # helper or nothing.
+        kill([proc.pid])
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
