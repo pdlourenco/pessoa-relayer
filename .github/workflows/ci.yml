@@ -32,6 +32,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      # "stable" keeps CI green across releases; deployments pin an exact
-      # version in .env (README "Deploy").
-      - run: scripts/image-smoke.sh stable
+      # Pinned in .claude-code-version and bumped by PR, so CI tests the
+      # exact Claude Code version a release would ship.
+      - run: scripts/image-smoke.sh "$(cat .claude-code-version)"
+
+  image-extras:
+    name: image extras (every optional tool on)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: build with every extra
+        run: >
+          docker build -t pessoa-relayer:extras
+          --build-arg CLAUDE_CODE_VERSION="$(cat .claude-code-version)"
+          --build-arg INSTALL_GH=1 --build-arg TEA_VERSION=0.9.2
+          --build-arg GLAB_VERSION=1.131.0 --build-arg BUN_VERSION=1.2.0
+          --build-arg EXTRA_APT_PACKAGES=jq .
+      - name: each extra runs
+        run: |
+          for t in gh tea glab bun jq; do
+            docker run --rm --entrypoint "$t" pessoa-relayer:extras --version
+          done
+
+  release-tag-check:
+    name: release tag check fails on a mismatch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: matching tag passes
+        run: scripts/check-release-tag.sh "v$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+      - name: mismatched tag fails
+        run: "! scripts/check-release-tag.sh v999.0.0"

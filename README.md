@@ -60,46 +60,55 @@ Messaging channels (Telegram, then Signal) come after these.
 
 ## Deploy
 
-Everything host-specific goes in `.env` and a config directory; the
-repository holds only examples.
+Each trust class runs as its own container from the same published image
+(`ghcr.io/pdlourenco/pessoa-relayer:<tag>`, built and smoke-tested by the
+release workflow). A deployment keeps its compose file, `.env` and
+`relayer.yaml` files outside this repository; `compose.example.yaml` and
+`.env.example` show the shape.
 
-1. Copy `.env.example` to `.env`. Pin `CLAUDE_CODE_VERSION`, set the user
-   ids, and fill in the four host paths. Create the Claude, work and state
-   directories yourself and give them to that user (`chown AGENT_UID:AGENT_GID`):
-   if compose creates a missing one, it is owned by root and the container
+1. Copy `.env.example` to `.env` and pin `RELAYER_IMAGE_TAG` to an exact
+   release. Fill in the host paths. Create the Claude, work and state
+   directories yourself and give them to uid/gid 1000, the image's user: if
+   compose creates a missing one, it is owned by root and the container
    cannot write it. Back up those three.
-2. Put `heteronyms.yaml` and `relayer.yaml` in the config directory, starting
-   from `examples/`. Keep `CLAUDE_CONFIG_DIR`, `DISABLE_AUTOUPDATER` and
-   `DISABLE_UPDATES` in `relayer.yaml`'s `pass_env`: sessions inherit nothing
-   else, and without `CLAUDE_CONFIG_DIR` they would not find the sign-in.
-3. Build, check the config inside the image, then sign in once,
+2. Mount your private definitions repository (`heteronyms.yaml` and
+   `templates/`) read-only at `/definitions`. Check it whole, including the
+   cross-class checks, with `relayer validate` and no `--class`.
+3. Write one `relayer.yaml` per container, starting from
+   `examples/relayer.yaml`; its `class` picks the heteronyms that container
+   runs. Keep `CLAUDE_CONFIG_DIR`, `DISABLE_AUTOUPDATER` and
+   `DISABLE_UPDATES` in its `pass_env`: sessions inherit nothing else, and
+   without `CLAUDE_CONFIG_DIR` they would not find the sign-in.
+4. Check the configuration inside the image, then sign in once,
    interactively, with your own subscription:
 
    ```bash
-   docker compose -f compose.example.yaml build
+   docker compose run --rm assistants relayer validate
    ```
 
    ```bash
-   docker compose -f compose.example.yaml run --rm relayer relayer validate
-   ```
-
-   ```bash
-   docker compose -f compose.example.yaml run --rm relayer claude
+   docker compose run --rm assistants claude
    ```
 
    Complete the login, confirm `/status` shows your plan rather than an API
    key, and exit. The sign-in lives in the Claude directory you mounted.
-4. Start the supervisor:
+5. Start the supervisor:
 
    ```bash
-   docker compose -f compose.example.yaml up -d
+   docker compose up -d
    ```
 
 Network settings (`network_mode`, `networks`) depend on the host: put them
-in a compose override file, not in the example. The container gets no
-Docker socket, no privileged mode and no extra capabilities. Updating Claude
-Code means changing `CLAUDE_CODE_VERSION` and rebuilding; the image turns
-off the updater so the version moves only then.
+in a compose override file. The container gets no Docker socket, no
+privileged mode and no extra capabilities.
+
+Updating Claude Code means a new release: bump `.claude-code-version` in a
+PR (CI tests that exact version), tag, and move the deployment's pinned tag.
+The image turns off the updater so the version moves only then.
+
+Optional tools are build arguments, all off by default: `INSTALL_GH=1`,
+`TEA_VERSION`, `GLAB_VERSION`, `BUN_VERSION`, and `EXTRA_APT_PACKAGES` for
+language toolchains. Build your own image with the ones a class needs.
 
 ## Licence
 

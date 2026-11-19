@@ -1,21 +1,18 @@
-# Example compose file for pessoa-relayer. Every host-specific value comes
-# from .env (copy .env.example); nothing here names a host. Network settings
-# are host-specific too: put network_mode or networks in an override file.
+# Example compose file for pessoa-relayer: one service per trust class
+# (README "Deploy"). A real deployment keeps its own compose file outside
+# this repository, pins an exact image tag, and puts every host-specific
+# value in .env. Network settings are host-specific too: put network_mode or
+# networks in an override file.
 services:
-  relayer:
-    build:
-      context: .
-      args:
-        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:?pin a Claude Code version}
-        AGENT_UID: ${AGENT_UID:-1000}
-        AGENT_GID: ${AGENT_GID:-1000}
-    image: pessoa-relayer:${CLAUDE_CODE_VERSION:?pin a Claude Code version}
+  assistants:
+    image: ghcr.io/pdlourenco/pessoa-relayer:${RELAYER_IMAGE_TAG:?pin a release tag, e.g. v0.1.0}
     restart: unless-stopped
     volumes:
+      - ${RELAYER_DEFINITIONS_DIR:?host path of the private definitions repository}:/definitions:ro
+      - ${RELAYER_CONFIG_DIR:?host path holding this class's relayer.yaml}:/config:ro
       - ${RELAYER_CLAUDE_DIR:?host path for Claude Code config and sign-in}:/home/agent/.claude
       - ${RELAYER_WORK_DIR:?host path for heteronym workspaces}:/work
       - ${RELAYER_STATE_DIR:?host path for supervisor state}:/state
-      - ${RELAYER_CONFIG_DIR:?host path holding heteronyms.yaml and relayer.yaml}:/config:ro
     mem_limit: ${RELAYER_MEM_LIMIT:-4g}
     # No Docker socket, no privileged mode, no extra capabilities.
     cap_drop: [ALL]

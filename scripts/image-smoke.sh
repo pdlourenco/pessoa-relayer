@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # image-smoke.sh — build the image and check what it promises (README
-# §"Deploy", docs/SPEC.md §3.2). Needs a running Docker daemon. CI runs it;
-# run it locally before changing the Dockerfile.
+# §"Deploy", docs/SPEC.md §3.2). Needs a running Docker daemon. CI and the
+# release workflow run it; run it locally before changing the Dockerfile.
 #
-#   scripts/image-smoke.sh <claude-code-version>
+#   scripts/image-smoke.sh "$(cat .claude-code-version)"
 set -euo pipefail
 cd "$(dirname "$0")/.."
 version="${1:?usage: $0 <claude-code-version>}"
@@ -41,7 +41,12 @@ run --entrypoint sh "$tag" -c 'test "$DISABLE_AUTOUPDATER" = 1 && test "$DISABLE
 
 echo "== shipped examples validate inside the image"
 run --entrypoint relayer "$tag" validate --heteronyms /opt/relayer/examples/heteronyms.yaml \
-  --runtime /opt/relayer/examples/relayer.yaml
+  --templates /opt/relayer/examples/templates --runtime /opt/relayer/examples/relayer.yaml
+
+echo "== optional extras are off by default"
+# shellcheck disable=SC2016  # expanded inside the container, on purpose
+run --entrypoint sh "$tag" -c 'for t in gh tea glab bun; do ! command -v "$t" >/dev/null || exit 1; done' \
+  || fail "an optional extra is installed in the default image"
 
 echo "== supervise refuses to start with an API key in the environment"
 set +e
