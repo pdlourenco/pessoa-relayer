@@ -1,0 +1,30 @@
+"""Shared test fixtures."""
+
+from relayer.config import Channel, Persona
+
+
+def persona(name="pa", tier="standard", enabled=True, folder=None, allow=("Read",)):
+    return Persona(name=name, template="assistant", tier=tier,
+                   channel=Channel("signal", f"group.{name}"),
+                   folders=(folder or f"/work/{name}",), allow=tuple(allow),
+                   deny=("Edit(./.claude/**)",), idle_stop=None, enabled=enabled)
+
+
+class FakeBackend:
+    """Records calls; ``fail`` names sessions whose start raises."""
+
+    def __init__(self, running=None, fail=()):
+        self.running = dict(running or {})
+        self.calls = []
+        self.fail = set(fail)
+
+    def list(self):
+        return dict(self.running)
+
+    def start(self, name, argv, workdir, env, config_hash):
+        self.calls.append(("start", name, list(argv), workdir, dict(env), config_hash))
+        if name in self.fail:
+            raise RuntimeError("boom")
+
+    def stop(self, name):
+        self.calls.append(("stop", name))

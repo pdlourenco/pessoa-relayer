@@ -1,0 +1,13 @@
+# Example runtime config for Claude Code (docs/SPEC.md §3). Copy and adjust;
+# nothing here names a host.
+version: 1
+work_root: /work
+models:
+  fast: haiku
+  standard: sonnet
+  strong: opus
+  frontier: fable
+session:
+  command: ["claude", "--model", "{model}", "--settings", "{settings}"]
+  env: {}
+tmux_socket: pessoa

@@ -131,3 +131,69 @@ limits remain: an `Edit` rule does not cover writes made through a shell,
 and a permission-skipping mode ignores it. Which mechanism enforces the caps
 in practice (permission rules or a pre-tool hook) is a deployment choice
 this runtime does not make.
+
+## 3. Runtime config: `relayer.yaml`
+
+How sessions are launched on one host. `examples/relayer.yaml` is a Claude
+Code starting point; nothing in it names a host.
+
+### 3.1 Shape
+
+```yaml
+version: 1                      # required
+work_root: <absolute path>      # default /work; --work-root or RELAYER_WORK_ROOT override it
+models:                         # required: one model for every tier
+  fast: <model>
+  standard: <model>
+  strong: <model>
+  frontier: <model>
+session:
+  command: [<arg>, …]           # required; placeholders below
+  env: {<NAME>: <value>, …}     # extra environment for every session
+tmux_socket: <name>             # default pessoa; [A-Za-z0-9_-]{1,64}
+```
+
+`command` arguments may contain these placeholders, and no others:
+
+| Placeholder | Becomes |
+|---|---|
+| `{model}` | `models[<persona tier>]` |
+| `{name}` | the persona name |
+| `{workdir}` | the persona's first folder |
+| `{settings}` | `{"permissions":{"allow":[…],"deny":[…]}}`, the persona's resolved lists as compact JSON |
+
+For Claude Code, `--settings {settings}` passes the caps at launch; the tool
+merges them with the workspace's own settings (§2.3).
+
+Verified by: `tests/test_runtime.py::RuntimeConfig`.
+
+### 3.2 No API key
+
+Sessions run on the signed-in subscription. An `ANTHROPIC_API_KEY` in the
+environment outranks that sign-in, so sessions would bill the key instead.
+`relayer reconcile` refuses to act (exit 2) while the variable is set and
+non-empty, before touching any session, and `session.env` may not set it.
+
+Verified by: `tests/test_runtime.py::ApiKeyGuard`,
+`tests/test_runtime.py::RuntimeConfig::test_api_key_in_session_env`.
+
+## 4. Reconciliation
+
+`relayer reconcile` compares enabled personas with the sessions running on
+the runtime's tmux socket, and acts:
+
+| Session state | Persona | Action |
+|---|---|---|
+| running | absent from `personas.yaml` | stop |
+| running | disabled | stop |
+| running, hash differs or missing | enabled | restart |
+| not running | enabled | start |
+
+Stops run first, then restarts, then starts, each group in name order. One
+failed action is reported and does not stop the others. Before a start, the
+persona's first folder is created if missing. The runtime only manages
+sessions on its own tmux socket. Each session carries its configuration
+hash (§1.4) in the tmux user option `@relayer_hash`.
+
+Verified by: `tests/test_reconcile.py`, `tests/test_tmux.py` (real tmux,
+skipped where it is not installed).
