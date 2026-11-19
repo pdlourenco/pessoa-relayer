@@ -259,6 +259,10 @@ class Rejections(unittest.TestCase):
         self.assertRejected(persona_file("pa: {template: assistant, channel: {kind: signal, chat: ' '}}\n"),
                             "channel.chat: must be a non-empty string")
 
+    def test_padded_chat(self):
+        self.assertRejected(persona_file("pa: {template: assistant, channel: {kind: signal, chat: ' g'}}\n"),
+                            "no leading or trailing spaces")
+
     def test_empty_folders(self):
         self.assertRejected(persona_file("pa: {template: assistant, folders: []}\n"),
                             "must name at least one folder")

@@ -113,9 +113,9 @@ def _construct_mapping(loader, node, deep=False):
     seen = set()
     for key_node, _ in node.value:
         key = loader.construct_object(key_node, deep=deep)
-        if not isinstance(key, (str, int, float, bool)) and key is not None:
+        if not isinstance(key, (str, int, float)) or isinstance(key, bool):
             raise yaml.constructor.ConstructorError(
-                None, None, "mapping keys must be scalars", key_node.start_mark)
+                None, None, "mapping keys must be strings or numbers", key_node.start_mark)
         if key in seen:
             raise yaml.constructor.ConstructorError(
                 None, None, f"duplicate key {key!r}", key_node.start_mark)
@@ -312,6 +312,8 @@ def _persona(name: str, data: Any, templates: dict[str, Template],
                               f"template {tpl.name!r} ({list(tpl.channel_kinds)})")
             if not isinstance(chat, str) or not chat.strip():
                 errors.append(f"{where}.channel.chat: must be a non-empty string")
+            elif chat != chat.strip():
+                errors.append(f"{where}.channel.chat: no leading or trailing spaces")
             if isinstance(kind, str) and isinstance(chat, str):
                 channel = Channel(kind=kind, chat=chat)
 
