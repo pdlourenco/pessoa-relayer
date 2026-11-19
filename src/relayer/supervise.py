@@ -1,7 +1,7 @@
 """The session supervisor (docs/SPEC.md §5).
 
 ``relayer supervise`` runs forever: every tick it reloads the config,
-reconciles, stops sessions idle past their persona's ``idle_stop`` (parking
+reconciles, stops sessions idle past their heteronym's ``idle_stop`` (parking
 them until woken), and backs off sessions that keep dying right after start.
 
 ``Supervisor.tick`` holds all the logic and takes the clock, backend and
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .config import ConfigError, Persona
+from .config import ConfigError, Heteronym
 from .reconcile import Action, apply, plan
 from .runtime import Runtime
 from .sessions import Backend, SessionError
@@ -34,7 +34,7 @@ STABLE_UPTIME = 300
 MAX_BACKOFF = 900
 MAX_EXPONENT = 10        # 2**10 already exceeds MAX_BACKOFF for any interval >= 1s
 
-Loader = Callable[[], tuple[Runtime, dict[str, Persona]]]
+Loader = Callable[[], tuple[Runtime, dict[str, Heteronym]]]
 
 
 def check_state_dir(root: Path) -> str | None:
@@ -51,7 +51,7 @@ def check_state_dir(root: Path) -> str | None:
 
 
 class ParkStore:
-    """Personas stopped for idleness, one marker file each under ``root``.
+    """Heteronyms stopped for idleness, one marker file each under ``root``.
 
     A marker survives supervisor restarts. ``relayer wake <name>`` (or a
     channel, later) removes it, and the next tick starts the session.
@@ -71,7 +71,7 @@ class ParkStore:
 
     def wake(self, name: str) -> bool:
         if not NAME_RE.match(name):
-            raise ValueError(f"not a persona name: {name!r}")
+            raise ValueError(f"not a heteronym name: {name!r}")
         try:
             (self.root / name).unlink()
             return True
@@ -94,7 +94,7 @@ class Supervisor:
         self.parks = parks
         self.interval = interval
         self.environ = environ
-        self.config: tuple[Runtime, dict[str, Persona]] | None = None
+        self.config: tuple[Runtime, dict[str, Heteronym]] | None = None
         self.crashes: dict[str, _Crash] = {}
 
     def tick(self, now: float) -> list[str]:
@@ -110,7 +110,7 @@ class Supervisor:
                        if self.config else "config: no valid configuration yet; doing nothing")
         if self.config is None:
             return log
-        runtime, personas = self.config
+        runtime, heteronyms = self.config
 
         try:
             running = self.backend.list()
@@ -132,16 +132,16 @@ class Supervisor:
                 crash.count = 0
 
         parked = self.parks.names()
-        # Forget parks for personas that no longer exist or are disabled.
+        # Forget parks for heteronyms that no longer exist or are disabled.
         for name in sorted(parked):
-            if name not in personas or not personas[name].enabled:
+            if name not in heteronyms or not heteronyms[name].enabled:
                 self.parks.wake(name)
                 parked.discard(name)
 
         # Idle stop: running past idle_stop since the last activity.
         idle: list[Action] = []
         for name, session in running.items():
-            p = personas.get(name)
+            p = heteronyms.get(name)
             if (p and p.enabled and p.idle_stop is not None and session.last_activity
                     and now - session.last_activity >= p.idle_stop):
                 try:
@@ -152,14 +152,14 @@ class Supervisor:
                 idle.append(Action("stop", name, f"idle for {now - session.last_activity:.0f}s"))
                 parked.add(name)
 
-        # Parked personas count as disabled, so plan() neither starts them nor
+        # Parked heteronyms count as disabled, so plan() neither starts them nor
         # leaves them running.
         effective = {n: dataclasses.replace(p, enabled=False) if n in parked else p
-                     for n, p in personas.items()}
+                     for n, p in heteronyms.items()}
         actions = plan(effective, running, runtime.session_hash)
         actions = [a for a in actions if a.name not in {i.name for i in idle}] + idle
 
-        # Back-off: hold starts of a persona that keeps crashing.
+        # Back-off: hold starts of a heteronym that keeps crashing.
         held = []
         for a in actions:
             crash = self.crashes.get(a.name)

@@ -1,6 +1,6 @@
-"""Reconcile running sessions against personas.yaml (docs/SPEC.md §4).
+"""Reconcile running sessions against heteronyms.yaml (docs/SPEC.md §4).
 
-``plan`` is pure: desired personas and running sessions in, actions out.
+``plan`` is pure: desired heteronyms and running sessions in, actions out.
 ``apply`` carries the actions out on a backend. Keeping them apart lets the
 supervisor log a plan before acting and lets tests cover every case without
 tmux.
@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass
 from typing import Callable, Literal
 
-from .config import Persona
+from .config import Heteronym
 from .runtime import Runtime
 from .sessions import Backend, Running
 
@@ -30,30 +30,30 @@ class Action:
 _ORDER = {"stop": 0, "restart": 1, "start": 2}
 
 
-def plan(desired: dict[str, Persona], running: dict[str, Running],
-         session_hash: Callable[[Persona], str]) -> list[Action]:
+def plan(desired: dict[str, Heteronym], running: dict[str, Running],
+         session_hash: Callable[[Heteronym], str]) -> list[Action]:
     """``session_hash`` gives the hash a correctly configured session carries."""
     actions = []
     for name, session in running.items():
-        persona = desired.get(name)
-        if persona is None:
-            actions.append(Action("stop", name, "not in personas.yaml"))
-        elif not persona.enabled:
+        heteronym = desired.get(name)
+        if heteronym is None:
+            actions.append(Action("stop", name, "not in heteronyms.yaml"))
+        elif not heteronym.enabled:
             actions.append(Action("stop", name, "disabled"))
-        elif session.config_hash != session_hash(persona):
+        elif session.config_hash != session_hash(heteronym):
             actions.append(Action("restart", name, "configuration changed"))
-    for name, persona in desired.items():
-        if persona.enabled and name not in running:
+    for name, heteronym in desired.items():
+        if heteronym.enabled and name not in running:
             actions.append(Action("start", name, "not running"))
     # Stops first, so a restart or start never races a session being removed.
     return sorted(actions, key=lambda a: (_ORDER[a.kind], a.name))
 
 
-def apply(actions: list[Action], desired: dict[str, Persona], backend: Backend,
+def apply(actions: list[Action], desired: dict[str, Heteronym], backend: Backend,
           runtime: Runtime, environ: dict[str, str]) -> list[str]:
     """Carry out ``actions``; returns one error line per action that failed.
 
-    A failing action does not stop the others: one broken persona must not
+    A failing action does not stop the others: one broken heteronym must not
     keep the rest down.
     """
     errors = []
@@ -62,11 +62,11 @@ def apply(actions: list[Action], desired: dict[str, Persona], backend: Backend,
             if action.kind in ("stop", "restart"):
                 backend.stop(action.name)
             if action.kind in ("start", "restart"):
-                persona = desired[action.name]
-                workdir = persona.folders[0]
+                heteronym = desired[action.name]
+                workdir = heteronym.folders[0]
                 os.makedirs(workdir, exist_ok=True)
-                backend.start(action.name, runtime.session_command(persona, environ),
-                              workdir, runtime.session_hash(persona))
+                backend.start(action.name, runtime.session_command(heteronym, environ),
+                              workdir, runtime.session_hash(heteronym))
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             errors.append(f"{action}: failed: {exc}")
     return errors

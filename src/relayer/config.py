@@ -1,10 +1,10 @@
-"""Load and validate ``personas.yaml`` and persona templates.
+"""Load and validate ``heteronyms.yaml`` and heteronym templates.
 
-The format is specified in docs/SPEC.md §1 (personas) and §2 (templates).
+The format is specified in docs/SPEC.md §1 (heteronyms) and §2 (templates).
 Validation collects every error rather than stopping at the first, so one
 run of ``relayer validate`` shows everything wrong with a file.
 
-Security-relevant rules (docs/SPEC.md §2.2): a persona can never get a tier,
+Security-relevant rules (docs/SPEC.md §2.2): a heteronym can never get a tier,
 a permission or a folder its template does not allow. Unknown keys are
 errors, because a misspelt key that is silently ignored can drop a cap.
 """
@@ -32,7 +32,7 @@ SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9._@+/-]*$")
 DURATION_RE = re.compile(r"^([1-9][0-9]*)([mhd])$")
 DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400}
 
-PERSONA_KEYS = {"template", "tier", "channel", "folders", "permissions",
+HETERONYM_KEYS = {"template", "tier", "channel", "folders", "permissions",
                 "idle_stop", "enabled"}
 TEMPLATE_KEYS = {"version", "description", "max_tier", "default_tier",
                  "folders", "permissions", "channel_kinds", "idle_stop",
@@ -70,8 +70,8 @@ class Channel:
 
 
 @dataclass(frozen=True)
-class Persona:
-    """A persona with template defaults applied and placeholders resolved."""
+class Heteronym:
+    """A heteronym with template defaults applied and placeholders resolved."""
 
     name: str
     template: str
@@ -280,11 +280,11 @@ def load_templates(directory: Path) -> dict[str, Template]:
     return templates
 
 
-# --- personas -------------------------------------------------------------------
+# --- heteronyms -------------------------------------------------------------------
 
-def _persona(name: str, data: Any, templates: dict[str, Template],
-             work_root: str, errors: list[str]) -> Persona | None:
-    where = f"personas.{name}"
+def _heteronym(name: str, data: Any, templates: dict[str, Template],
+             work_root: str, errors: list[str]) -> Heteronym | None:
+    where = f"heteronyms.{name}"
     start = len(errors)
     if not isinstance(name, str) or not NAME_RE.match(name):
         errors.append(f"{where}: name must match {NAME_RE.pattern}")
@@ -292,7 +292,7 @@ def _persona(name: str, data: Any, templates: dict[str, Template],
     if not isinstance(data, dict):
         errors.append(f"{where}: must be a mapping")
         return None
-    _unknown_keys(data, PERSONA_KEYS, where, errors)
+    _unknown_keys(data, HETERONYM_KEYS, where, errors)
 
     tpl_name = data.get("template")
     tpl = templates.get(tpl_name) if isinstance(tpl_name, str) else None
@@ -364,23 +364,23 @@ def _persona(name: str, data: Any, templates: dict[str, Template],
 
     if len(errors) > start:
         return None
-    return Persona(name=name, template=tpl.name, tier=tier, channel=channel,
+    return Heteronym(name=name, template=tpl.name, tier=tier, channel=channel,
                    folders=tuple(folders), allow=tuple(allow), deny=tpl.deny,
                    idle_stop=idle_stop, enabled=enabled)
 
 
-def _overlaps(personas: dict[str, Persona]) -> list[str]:
+def _overlaps(heteronyms: dict[str, Heteronym]) -> list[str]:
     """No shared or nested folders, no shared chat (docs/SPEC.md §1.3)."""
     errors = []
-    items = sorted(personas.items())
+    items = sorted(heteronyms.items())
     chats: dict[tuple[str, str], str] = {}
     for name, p in items:
         if p.channel is None:
             continue
         key = (p.channel.kind, p.channel.chat)
         if key in chats:
-            errors.append(f"personas.{name}.channel: {p.channel.kind} chat "
-                          f"{p.channel.chat!r} is already used by personas.{chats[key]}")
+            errors.append(f"heteronyms.{name}.channel: {p.channel.kind} chat "
+                          f"{p.channel.chat!r} is already used by heteronyms.{chats[key]}")
         else:
             chats[key] = name
     for i, (a_name, a) in enumerate(items):
@@ -388,26 +388,26 @@ def _overlaps(personas: dict[str, Persona]) -> list[str]:
             for fa in a.folders:
                 for fb in b.folders:
                     if _within(fa, fb) or _within(fb, fa):
-                        errors.append(f"personas.{a_name}.folders: {fa!r} overlaps "
-                                      f"personas.{b_name} folder {fb!r}")
+                        errors.append(f"heteronyms.{a_name}.folders: {fa!r} overlaps "
+                                      f"heteronyms.{b_name} folder {fb!r}")
     return errors
 
 
-def load_personas(path: Path, templates: dict[str, Template],
-                  work_root: str = "/work") -> dict[str, Persona]:
-    """Load and validate ``personas.yaml``; raises ConfigError on any error."""
+def load_heteronyms(path: Path, templates: dict[str, Template],
+                  work_root: str = "/work") -> dict[str, Heteronym]:
+    """Load and validate ``heteronyms.yaml``; raises ConfigError on any error."""
     data = _load_yaml(path)
     errors: list[str] = []
     if not isinstance(data, dict):
         raise ConfigError([f"{path}: must be a mapping"])
-    _unknown_keys(data, {"version", "personas"}, str(path), errors)
+    _unknown_keys(data, {"version", "heteronyms"}, str(path), errors)
     if not _is_version(data.get("version")):
         errors.append(f"{path}: version must be {FORMAT_VERSION}")
-    entries = data.get("personas")
+    entries = data.get("heteronyms")
     if entries is None:
         entries = {}
     if not isinstance(entries, dict):
-        raise ConfigError(errors + [f"{path}: personas must be a mapping"])
+        raise ConfigError(errors + [f"{path}: heteronyms must be a mapping"])
 
     if (not work_root.startswith("/") or work_root.startswith("//")
             or posixpath.normpath(work_root) != work_root or work_root == "/"
@@ -416,12 +416,12 @@ def load_personas(path: Path, templates: dict[str, Template],
                                     "absolute, normalised path below /, "
                                     "using only [A-Za-z0-9._@+-/]"])
 
-    personas: dict[str, Persona] = {}
+    heteronyms: dict[str, Heteronym] = {}
     for name, entry in entries.items():
-        persona = _persona(name, entry, templates, work_root, errors)
-        if persona is not None:
-            personas[name] = persona
-    errors.extend(_overlaps(personas))
+        heteronym = _heteronym(name, entry, templates, work_root, errors)
+        if heteronym is not None:
+            heteronyms[name] = heteronym
+    errors.extend(_overlaps(heteronyms))
     if errors:
         raise ConfigError(errors)
-    return personas
+    return heteronyms

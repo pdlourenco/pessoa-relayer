@@ -11,7 +11,7 @@ from relayer.cli import main
 from relayer.config import ConfigError
 from relayer.runtime import check_environment, load_runtime
 
-from helpers import persona
+from helpers import heteronym
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -42,7 +42,7 @@ class RuntimeConfig(unittest.TestCase):
 
     def test_session_argv_fills_placeholders(self):
         rt = self.load(GOOD)
-        argv = rt.session_argv(persona(tier="strong", allow=("Read", "Bash(git *)")))
+        argv = rt.session_argv(heteronym(tier="strong", allow=("Read", "Bash(git *)")))
         self.assertEqual(argv[:3], ["claude", "--model", "o"])
         self.assertEqual(json.loads(argv[4]), {"permissions": {
             "allow": ["Read", "Bash(git *)"], "deny": ["Edit(./.claude/**)"]}})
@@ -87,7 +87,7 @@ class RuntimeConfig(unittest.TestCase):
         # A trailing ";" in an argument must stay inside quotes: tmux treats a
         # bare trailing ";" as a command separator.
         rt = self.load(GOOD.replace('"{settings}"]', '"{settings}", "x;"]'))
-        cmd = rt.session_command(persona(allow=("Bash(echo $HOME; rm *)",)), {"PATH": "/p"})
+        cmd = rt.session_command(heteronym(allow=("Bash(echo $HOME; rm *)",)), {"PATH": "/p"})
         self.assertFalse(cmd.endswith(";"))
         words = shlex.split(cmd)
         self.assertEqual(words[-1], "x;")
@@ -95,7 +95,7 @@ class RuntimeConfig(unittest.TestCase):
                          ["Bash(echo $HOME; rm *)"])
 
     def test_session_hash_tracks_runtime_changes(self):
-        p = persona()
+        p = heteronym()
         a = self.load(GOOD)
         b = self.load(GOOD.replace("strong: o", "strong: o2").replace("standard: s", "standard: s2"))
         c = self.load(GOOD + "  env: {X: '1'}\n")
@@ -130,7 +130,7 @@ class ApiKeyGuard(unittest.TestCase):
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-x"}), \
                 mock.patch("relayer.cli.TmuxBackend") as backend, \
                 mock.patch("sys.stderr"):
-            code = main(["reconcile", "--personas", str(REPO / "examples/personas.yaml"),
+            code = main(["reconcile", "--heteronyms", str(REPO / "examples/heteronyms.yaml"),
                          "--templates", str(REPO / "templates"),
                          "--runtime", str(REPO / "examples/relayer.yaml")])
         self.assertEqual(code, 2)
