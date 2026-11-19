@@ -338,5 +338,46 @@ class RealUsers(unittest.TestCase):
         self.assertEqual(backend.list(), {})
 
 
+
+class Login(unittest.TestCase):
+    """relayer login (docs/SPEC.md §6.3, §6.6), without real users."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        repo = Path(__file__).resolve().parent.parent
+        (root / "relayer.yaml").write_text(
+            "version: 1\nclass: assistants\nisolation: none\n"
+            "models: {fast: f, standard: s, strong: o, frontier: x}\n"
+            "session:\n  command: [claude, --model, '{model}', --remote-control]\n")
+        (root / "heteronyms.yaml").write_text(
+            "version: 1\nheteronyms:\n  pa: {class: assistants, template: assistant}\n")
+        self.argv = ["login", "--heteronyms", str(root / "heteronyms.yaml"),
+                     "--templates", str(repo / "templates"),
+                     "--runtime", str(root / "relayer.yaml"),
+                     "--work-root", str(root / "work"), "--state", str(root / "state"), "pa"]
+
+    def run_login(self, running):
+        from relayer import cli
+        from relayer.sessions import Running
+        fake = mock.Mock()
+        fake.list.return_value = {"pa": Running("pa", "h", 0)} if running else {}
+        with mock.patch.object(cli, "_backend", return_value=(fake, None)), \
+                mock.patch.object(cli.os, "execvp") as execvp, mock.patch("sys.stderr"):
+            code = cli.main(self.argv)
+        return code, execvp
+
+    def test_runs_the_full_session_command(self):
+        code, execvp = self.run_login(running=False)
+        argv = execvp.call_args.args[1]
+        self.assertEqual(argv[-4:], ["claude", "--model", "s", "--remote-control"])
+
+    def test_refuses_while_the_session_runs(self):
+        code, execvp = self.run_login(running=True)
+        self.assertEqual(code, 1)
+        execvp.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

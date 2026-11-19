@@ -368,8 +368,11 @@ are owned by its user, mode 700.
   runs (`kill -KILL -1` as that user); a stop that leaves a process behind
   is reported as failed.
 - Each heteronym signs in once, on its own: `relayer login <name>` runs the
-  agent program interactively as that user, in its workspace, with the
-  session's environment. Its credentials then live in its own home.
+  heteronym's exact session command (§3.1) interactively, as its user, in
+  its workspace, with the session's environment, so every first-run prompt
+  is answered in the configuration the supervisor will use. Its credentials
+  then live in its own home. `login` refuses while that heteronym's session
+  is running; set `enabled: false` first.
 
 ### 6.4 Capabilities
 
@@ -392,6 +395,47 @@ heteronym's folders; what it must do there, it does as that heteronym.
 `isolation: none` runs every session as the supervisor's own user, with no
 users, no ownership changes and no isolation between heteronyms. It is for
 running outside a container: tests and single-user development.
+
+### 6.6 Remote Control
+
+The owner reaches a heteronym's session from the Claude app through Claude
+Code's Remote Control. With Claude Code, the session command carries
+`--remote-control` (`examples/relayer.yaml`). Remote Control needs:
+
+- the heteronym's own full claude.ai sign-in (`relayer login`); API keys
+  and `claude setup-token` tokens are refused by Claude Code;
+- the first-run answers: trusting the workspace, and enabling Remote
+  Control. Both need a terminal, so they are given once during
+  `relayer login`, which runs the same command;
+- outbound HTTPS to `api.anthropic.com`, `claude.ai` and `claude.com`
+  (Claude Code's network requirements), and neither
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` nor a non-default
+  `ANTHROPIC_BASE_URL` in the session's environment.
+
+Nothing about the per-user isolation (§6.1–§6.4) stands in its way: the
+session's process is an ordinary user process with no capabilities that
+makes outbound connections only.
+
+**What CI checks:** that the pinned Claude Code, run as an unprivileged
+user, offers `--remote-control` (`scripts/image-smoke.sh`). **What it
+cannot:** that a session connects, which needs a real sign-in on a real
+plan. The manual check, for one heteronym `<name>` of class `<class>`:
+
+1. In `heteronyms.yaml`, give `<name>` `enabled: false`, and let the
+   supervisor reconcile (its session, if any, stops).
+2. `docker compose exec <class> relayer login <name>`. Sign in with
+   `/login`, trust the workspace, accept the Remote Control prompt, and
+   check that `/status` shows the plan (not an API key) and that the
+   `/rc active` indicator shows. Exit.
+3. Set `enabled: true`. The supervisor starts the session as `h-<name>`
+   under the container's three capabilities:
+   `docker compose exec <class> ps -o user=,args= -C claude` shows
+   `h-<name>` and `--remote-control`.
+4. In the Claude app, the session appears in the Remote Control list.
+   Send it a message; it answers from its workspace.
+5. If it does not appear, run Claude Code's own eligibility checks as the
+   heteronym:
+   `docker compose exec --user h-<name> <class> env HOME=/homes/<name> CLAUDE_CONFIG_DIR=/homes/<name>/.claude claude doctor`.
 
 Verified by: `tests/test_users.py` (`RealUsers` creates real users and runs
 one case with only the three capabilities; CI runs it as root), and

@@ -168,8 +168,9 @@ def cmd_wake(args: argparse.Namespace) -> int:
 
 
 def cmd_login(args: argparse.Namespace) -> int:
-    """Run the agent interactively as a heteronym's user, for its one-time
-    sign-in (docs/SPEC.md §6.3). Replaces this process."""
+    """Run the heteronym's own session command interactively, as its user, in
+    its workspace, for the one-time sign-in and first-run prompts (docs/SPEC.md
+    §6.3, §6.6). Replaces this process."""
     try:
         runtime, _, heteronyms = _load(args)
     except ConfigError as exc:
@@ -183,6 +184,17 @@ def cmd_login(args: argparse.Namespace) -> int:
         _errors([problem])
         return 1
     heteronym = heteronyms[args.name]
+    try:
+        running = args.name in backend.list()
+    except SessionError as exc:
+        _errors([str(exc)])
+        return 1
+    if running:
+        # Two agents in one workspace, one of them unseen by the supervisor,
+        # would fight over the same files and settings.
+        _errors([f"{args.name}: its session is running; set enabled: false for it, "
+                 "let the supervisor stop it, then run login again"])
+        return 1
     identity = None
     prefix: list[str] = []
     if isinstance(backend, UserTmuxBackend):
@@ -190,10 +202,14 @@ def cmd_login(args: argparse.Namespace) -> int:
         ident = backend.accounts.identity(args.name)
         identity, prefix = ident.env(), ident.as_user()
     env = runtime.session_env(dict(os.environ), identity)
-    # env -C changes directory after setpriv has switched user: root here has
-    # no DAC_OVERRIDE and cannot enter the heteronym's 700 folder itself.
+    # The exact command the supervisor will run, flags included, so the
+    # sign-in, the workspace-trust prompt and the Remote Control prompt are
+    # answered once, in the configuration that will use them. env -C changes
+    # directory after setpriv has switched user: root here has no
+    # DAC_OVERRIDE and cannot enter the heteronym's 700 folder itself.
     argv = [*prefix, "env", "-i", "-C", heteronym.folders[0],
-            *(f"{k}={v}" for k, v in sorted(env.items())), runtime.command[0]]
+            *(f"{k}={v}" for k, v in sorted(env.items())),
+            *runtime.session_argv(heteronym)]
     os.execvp(argv[0], argv)
     return 0  # not reached
 

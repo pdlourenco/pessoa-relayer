@@ -11,7 +11,9 @@ models:
   strong: opus
   frontier: fable
 session:
-  command: ["claude", "--model", "{model}", "--settings", "{settings}"]
+  # --remote-control lets the owner reach each session from the Claude app;
+  # it needs the heteronym's own full sign-in (relayer login, docs/SPEC.md §6.6).
+  command: ["claude", "--model", "{model}", "--settings", "{settings}", "--remote-control"]
   # Sessions inherit nothing (docs/SPEC.md §4.2): HOME, USER and LOGNAME are
   # the heteronym's own, PATH, LANG and SHELL are passed, TERM is set, and
   # everything else must be listed here.
