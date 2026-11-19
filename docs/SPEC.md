@@ -69,8 +69,10 @@ see the others, so this cross-class check runs when the whole file is
 validated (`relayer validate` with no `--class`), for example in the
 definitions repository's own CI.
 
-Paths are compared after collapsing repeated leading slashes (`//work` is
-`/work`). No folder may resolve to `/`, and the work root must be an
+Every folder must lie below the work root (not equal to it): homes and the
+supervisor's state live elsewhere, and a folder there could be another
+heteronym's home. Paths are compared after collapsing repeated leading
+slashes (`//work` is `/work`). No folder may resolve to `/`, and the work root must be an
 absolute, normalised path below `/` without `{` or `}`.
 
 Verified by: `tests/test_config.py::Rejections` (`test_overlapping_heteronyms`,
@@ -218,9 +220,11 @@ neither `session.env` nor `session.pass_env` may name one. Sessions inherit
 nothing else either (§4.2), so a variable reaches a session only if this
 file lists it.
 
-Values in `env` and `pass_env` appear in the session's command line, which
-other processes of the same user can read, as they can its environment. Do
-not put secrets there.
+Values in `env` and `pass_env`, and the `{settings}` permission lists,
+appear in the session's command line. On Linux every process in the
+container can read every other's command line (`/proc/<pid>/cmdline`), so
+every heteronym of the class can read them. Never put secrets there; a
+heteronym's own secrets belong in its own home (§6).
 
 Verified by: `tests/test_runtime.py::ApiKeyGuard`,
 `tests/test_runtime.py::RuntimeConfig::test_api_key_in_session_env`.
@@ -319,26 +323,42 @@ default (`isolation: users`).
 ### 6.1 Users
 
 - Heteronym `<name>` runs as user and group `h-<name>`.
-- Its uid comes from `users.json` in the state directory, handed out from
-  `uid_base` in order and never reused for another name. A recreated
-  container, whose `/etc/passwd` starts empty, recreates each user with its
-  old uid, so its folders stay its own.
+- Its uid comes from `users.json` in the state directory (written under a
+  file lock), handed out from `uid_base` and never reused for another name.
+  A recreated container, whose `/etc/passwd` starts empty, recreates each
+  user with its old uid, so its folders stay its own.
+- If the map is lost, a heteronym whose home still exists gets back the uid
+  that owns it, and a new heteronym never receives a uid that owns anything
+  in the homes or work trees: files are never handed to a stranger.
 - The user is created the first time the heteronym starts. Only heteronyms
   of the container's own class (§1.5) ever get a user.
 
 ### 6.2 Folders
 
 The heteronym's home (`<homes>/<name>`) and every folder in its definition
-are owned by its user, mode 700. A missing folder under a root-owned parent
-is made by the supervisor and handed over; one under the heteronym's own
-folders is made as the heteronym. A folder owned by anyone else, or a
-symlink, is refused and the session is not started.
+are owned by its user, mode 700.
+
+- The supervisor walks each path from `/` by file descriptor, opening every
+  component with `O_NOFOLLOW`, and creates, chmods and chowns only through
+  descriptors. A heteronym that swaps a directory for a symlink in its own
+  folder therefore cannot redirect anything root does.
+- Root acts only on root-owned components. From the first component the
+  heteronym owns, the rest of the path is created and fixed as the
+  heteronym (`setpriv`), which can do nothing it could not do itself.
+- A component owned by anyone else, a symlink, or a file is refused, and
+  that heteronym's session is not started.
 
 ### 6.3 Sessions and sign-in
 
 - Each heteronym has its own tmux server, run as its user with no
-  capabilities (`setpriv --reuid --regid --clear-groups`). Its session's
-  `HOME`, `USER` and `LOGNAME` are its own (§4.2).
+  capabilities (`setpriv --reuid --regid --clear-groups`), with its socket
+  under its own home (`TMUX_TMPDIR`) rather than `/tmp/tmux-<uid>`, which
+  another heteronym could create first. Its session's `HOME`, `USER` and
+  `LOGNAME` are its own (§4.2).
+- From each heteronym's server only that heteronym's own session is read;
+  any other session it makes there is ignored. A server that cannot be
+  listed is logged and skipped, so one heteronym can never stop the
+  reconcile of its class.
 - Each heteronym signs in once, on its own: `relayer login <name>` runs the
   agent program interactively as that user, in its workspace, with the
   session's environment. Its credentials then live in its own home.

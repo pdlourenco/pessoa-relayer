@@ -177,6 +177,11 @@ class Rejections(unittest.TestCase):
         self.assertRejected(heteronym_file("a" + "b" * 30 + ": {class: assistants, template: assistant}\n"),
                             "name must match")
 
+    def test_folder_outside_the_work_root(self):
+        templates = {"assistant": ASSISTANT.replace('["{work}/{name}"]', '["/homes"]')}
+        self.assertRejected(heteronym_file('pa: {class: assistants, template: assistant, folders: ["/homes/other"]}\n'),
+                            "is not below the work root", templates)
+
     def test_bad_name(self):
         self.assertRejected(heteronym_file("Bad_Name: {class: assistants, template: assistant}\n"),
                             "name must match")

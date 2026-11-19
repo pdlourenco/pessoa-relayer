@@ -13,6 +13,7 @@ its folders stay its own. A uid is never reused for another name.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import pwd
@@ -67,20 +68,36 @@ class UidMap:
             raise AccountError(f"{self.path}: uid map must map names to integers")
         return data
 
-    def uid(self, name: str) -> int:
-        """The uid for ``name``, assigning the next free one if new."""
+    def uid(self, name: str, owner_hint: int | None = None,
+            taken: frozenset[int] = frozenset()) -> int:
+        """The uid for ``name``, assigning one if new.
+
+        ``owner_hint`` is the uid that already owns the heteronym's home,
+        if any: a lost or reset map is rebuilt from the files rather than
+        handing those files to a stranger. ``taken`` holds uids that own
+        anything in the homes or work trees; none is ever handed to a new
+        name (docs/SPEC.md §6.1).
+        """
         if not _NAME_RE.match(name):
             raise AccountError(f"not a heteronym name usable as a user: {name!r}")
-        assigned = self.load()
-        if name in assigned:
-            return assigned[name]
-        uid = max([self.base - 1, *assigned.values()]) + 1
-        assigned[name] = uid
-        tmp = self.path.with_suffix(".tmp")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(assigned, indent=2, sort_keys=True) + "\n")
-        os.replace(tmp, self.path)       # atomic: a crash never loses the map
-        return uid
+        if not self.path.parent.is_dir():       # the root-only state directory
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path.with_suffix(".lock"), "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)      # login and supervise share the map
+            assigned = self.load()
+            if name in assigned:
+                return assigned[name]
+            used = set(assigned.values()) | set(taken)
+            if owner_hint is not None and owner_hint >= self.base and \
+                    owner_hint not in set(assigned.values()):
+                uid = owner_hint
+            else:
+                uid = max([self.base - 1, *used]) + 1
+            assigned[name] = uid
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(assigned, indent=2, sort_keys=True) + "\n")
+            os.replace(tmp, self.path)   # atomic: a crash never loses the map
+            return uid
 
     def names(self) -> list[str]:
         return sorted(self.load())
@@ -89,14 +106,28 @@ class UidMap:
 class Accounts:
     """Creates users and their folders; needs root with CHOWN/SETUID/SETGID."""
 
-    def __init__(self, uids: UidMap, homes_root: str):
+    def __init__(self, uids: UidMap, homes_root: str, work_root: str = "/work"):
         self.uids = uids
         self.homes_root = homes_root
+        self.work_root = work_root
+
+    def _owners(self, root: str) -> set[int]:
+        try:
+            with os.scandir(root) as it:
+                return {e.stat(follow_symlinks=False).st_uid for e in it} - {0}
+        except FileNotFoundError:
+            return set()
 
     def identity(self, name: str) -> Identity:
-        uid = self.uids.uid(name)
-        return Identity(name, USER_PREFIX + name, uid, uid,
-                        os.path.join(self.homes_root, name))
+        home = os.path.join(self.homes_root, name)
+        try:
+            st = os.lstat(home)
+            hint = st.st_uid if stat.S_ISDIR(st.st_mode) and st.st_uid else None
+        except FileNotFoundError:
+            hint = None
+        taken = frozenset(self._owners(self.homes_root) | self._owners(self.work_root))
+        uid = self.uids.uid(name, owner_hint=hint, taken=taken)
+        return Identity(name, USER_PREFIX + name, uid, uid, home)
 
     def known(self) -> list[Identity]:
         return [self.identity(n) for n in self.uids.names()]
@@ -105,6 +136,12 @@ class Accounts:
         try:
             existing = pwd.getpwnam(ident.user)
         except KeyError:
+            try:
+                taken = pwd.getpwuid(ident.uid).pw_name
+            except KeyError:
+                taken = None
+            if taken is not None:
+                raise AccountError(f"uid {ident.uid} already belongs to {taken}")
             _run(["groupadd", "--gid", str(ident.gid), ident.user])
             _run(["useradd", "--uid", str(ident.uid), "--gid", str(ident.gid),
                   "--no-create-home", "--home-dir", ident.home,
@@ -117,55 +154,72 @@ class Accounts:
     def ensure_dir(self, ident: Identity, path: str) -> None:
         """Make ``path`` exist, owned by the heteronym, mode 700.
 
-        Components under a root-owned parent are created by root and
-        handed over; components under the heteronym's own folders are
-        created as the heteronym, since root here cannot write there.
-        A component owned by anyone else is refused.
+        Root walks down from "/" by file descriptor, never following a
+        symlink (O_NOFOLLOW), so nothing a heteronym does to paths can
+        redirect a root-side mkdir, chmod or chown. Root acts only on
+        root-owned components; from the first component the heteronym owns,
+        the rest is done as the heteronym, with nothing it could not do
+        itself. A component owned by anyone else is refused.
         """
         parts = Path(path).parts
-        current = Path(parts[0])
-        for part in parts[1:]:
-            parent, current = current, current / part
-            try:
-                st = os.lstat(current)
-            except FileNotFoundError:
-                st = None
-            except PermissionError:
-                # Inside a folder only its owner can enter: carry on as them.
-                st = "inaccessible"
-            if st is None:
-                owner = os.lstat(parent).st_uid
-                if owner == 0:
-                    os.mkdir(current, 0o700)
-                    os.chmod(current, 0o700)        # umask-proof
-                    os.chown(current, ident.uid, ident.gid)
-                elif owner == ident.uid:
-                    _run([*ident.as_user(), "mkdir", "-m", "700", "--", str(current)])
-                else:
-                    raise AccountError(f"{parent} belongs to uid {owner}, not "
-                                       f"{ident.user}; refusing to create {current}")
-                continue
-            if st == "inaccessible":
-                _run([*ident.as_user(), "mkdir", "-p", "-m", "700", "--", str(current)])
-                if current == Path(path):
-                    # chmod fails unless the heteronym owns it: that is the check.
-                    _run([*ident.as_user(), "chmod", "700", "--", str(current)])
-                continue
-            if stat.S_ISLNK(st.st_mode):
-                raise AccountError(f"{current} is a symlink; refusing to follow it")
-            if not stat.S_ISDIR(st.st_mode):
-                raise AccountError(f"{current} exists and is not a directory")
-            if current == Path(path) or st.st_uid == ident.uid:
-                self._own(ident, current, st)
+        if not parts or parts[0] != "/" or ".." in parts:
+            raise AccountError(f"{path!r} is not an absolute, normalised path")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        fd = os.open("/", flags)
+        try:
+            for i, part in enumerate(parts[1:], start=1):
+                last = i == len(parts) - 1
+                created = False
+                try:
+                    child = os.open(part, flags, dir_fd=fd)
+                except FileNotFoundError:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                    created = True
+                    child = os.open(part, flags, dir_fd=fd)
+                except PermissionError:
+                    # A folder root may not read: someone else's 700 folder.
+                    # O_PATH needs no read permission; it is enough to check
+                    # whose it is before acting as that user.
+                    probe = os.open(part, os.O_PATH | os.O_NOFOLLOW, dir_fd=fd)
+                    try:
+                        pst = os.fstat(probe)
+                    finally:
+                        os.close(probe)
+                    here = os.path.join(*parts[:i + 1])
+                    if not stat.S_ISDIR(pst.st_mode):
+                        raise AccountError(f"{here}: not a plain directory") from None
+                    if pst.st_uid != ident.uid:
+                        raise AccountError(f"{here} belongs to uid {pst.st_uid}, "
+                                           f"not {ident.user}") from None
+                    self._as_user_rest(ident, path)
+                    return
+                except OSError as exc:
+                    raise AccountError(f"{os.path.join(*parts[:i + 1])}: not a plain "
+                                       f"directory (symlink or file): {exc.strerror}") from None
+                os.close(fd)
+                fd = child
+                st = os.fstat(fd)
+                here = os.path.join(*parts[:i + 1])
+                if st.st_uid == 0:
+                    if created or last:
+                        os.fchmod(fd, 0o700)          # by descriptor: no path to swap
+                        os.fchown(fd, ident.uid, ident.gid)
+                        if not last:
+                            self._as_user_rest(ident, path)
+                        return
+                    continue                          # a root-owned ancestor: go on
+                if st.st_uid == ident.uid:
+                    self._as_user_rest(ident, path)
+                    return
+                raise AccountError(f"{here} belongs to uid {st.st_uid}, not {ident.user}")
+        finally:
+            os.close(fd)
 
-    def _own(self, ident: Identity, path: Path, st: os.stat_result) -> None:
-        if st.st_uid == 0:
-            os.chmod(path, 0o700)                   # still root's: chmod, then hand over
-            os.chown(path, ident.uid, ident.gid)
-        elif st.st_uid != ident.uid:
-            raise AccountError(f"{path} belongs to uid {st.st_uid}, not {ident.user}")
-        elif stat.S_IMODE(st.st_mode) != 0o700:
-            _run([*ident.as_user(), "chmod", "700", "--", str(path)])
+    def _as_user_rest(self, ident: Identity, path: str) -> None:
+        # Below the heteronym's own folder, act as the heteronym. chmod fails
+        # unless it owns the final folder: that is the ownership check.
+        _run([*ident.as_user(), "mkdir", "-p", "-m", "700", "--", path])
+        _run([*ident.as_user(), "chmod", "700", "--", path])
 
     def prepare(self, name: str, folders: tuple[str, ...]) -> Identity:
         ident = self.identity(name)

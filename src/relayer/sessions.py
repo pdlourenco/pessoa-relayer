@@ -49,6 +49,10 @@ class TmuxBackend:
         self._env = {k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ}
         if home is not None:
             self._env["HOME"] = home
+            # The socket lives under the heteronym's own 700 home, not
+            # /tmp/tmux-<uid>, which another heteronym could create first
+            # (uids are predictable) and so block this one's server.
+            self._env["TMUX_TMPDIR"] = home
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         proc = subprocess.run([*self._base, *args], capture_output=True, text=True,
@@ -64,7 +68,10 @@ class TmuxBackend:
             raise SessionError(f"tmux {' '.join(args[:2])}: {proc.stderr.strip()}")
         return proc
 
-    def list(self) -> dict[str, Running]:
+    def list(self, only: str | None = None) -> dict[str, Running]:
+        """Sessions on this server. With ``only``, every other line is
+        ignored, malformed ones included: on a heteronym's own server the
+        heteronym may have made sessions of its own (docs/SPEC.md §6.3)."""
         # "|" not tab: with no locale in its environment, tmux prints a tab
         # as "_". Names, hashes and timestamps cannot contain "|".
         # window_activity, not session_activity: in tmux 3.4 the latter only
@@ -80,6 +87,8 @@ class TmuxBackend:
         running = {}
         for line in proc.stdout.splitlines():
             parts = line.split("|")
+            if only is not None and (len(parts) != 3 or parts[0] != only):
+                continue
             if len(parts) != 3 or not _NAME_RE.match(parts[0]):
                 raise SessionError(f"tmux list-sessions: unexpected line {line!r}")
             name, config_hash, activity = parts
@@ -116,15 +125,22 @@ class UserTmuxBackend:
         self.socket = socket
         self.accounts = accounts
         self.tmux = tmux
+        self.errors: list[str] = []     # per-heteronym listing failures, last list()
 
     def _for(self, ident) -> TmuxBackend:
         return TmuxBackend(self.socket, self.tmux, prefix=ident.as_user(), home=ident.home)
 
     def list(self) -> dict[str, Running]:
         running: dict[str, Running] = {}
+        self.errors = []
         for ident in self.accounts.known():
-            found = self._for(ident).list()
-            # A user's server holds only that heteronym's session.
+            # One heteronym's server failing must not stop the others'
+            # reconcile: record it and carry on.
+            try:
+                found = self._for(ident).list(only=ident.name)
+            except Exception as exc:  # noqa: BLE001 - reported via .errors
+                self.errors.append(f"sessions of {ident.name}: {exc}")
+                continue
             if ident.name in found:
                 running[ident.name] = found[ident.name]
         return running

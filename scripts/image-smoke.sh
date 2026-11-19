@@ -60,6 +60,7 @@ cat > "$work/definitions/heteronyms.yaml" <<'YAML'
 version: 1
 heteronyms:
   smoke: {class: assistants, template: assistant}
+  other: {class: assistants, template: assistant}
 YAML
 # A stand-in for the agent: no sign-in, no network.
 cat > "$work/config/relayer.yaml" <<'YAML'
@@ -74,17 +75,21 @@ docker run -d --name relayer-smoke "${caps[@]}" \
   -v "$work/definitions:/definitions:ro" -v "$work/config:/config:ro" \
   "$tag" relayer supervise --interval 1 >/dev/null
 for _ in $(seq 1 30); do
-  user=$(docker exec relayer-smoke ps -o user= -C sleep 2>/dev/null | head -1 || true)
-  [ -n "$user" ] && break
+  users=$(docker exec relayer-smoke ps -o user= -C sleep 2>/dev/null | sort | tr '\n' ' ' || true)
+  [ "$users" = "h-other h-smoke " ] && break
   sleep 1
 done
-[ "$user" = "h-smoke" ] || { docker logs relayer-smoke >&2; fail "session runs as '$user', not h-smoke"; }
+[ "$users" = "h-other h-smoke " ] || { docker logs relayer-smoke >&2; fail "sessions run as '$users'"; }
 for d in /work/smoke /homes/smoke; do
   got=$(docker exec relayer-smoke stat -c '%U %a' "$d")
   [ "$got" = "h-smoke 700" ] || fail "$d is '$got', expected 'h-smoke 700'"
 done
-docker exec relayer-smoke sh -c 'grep -q "^CapEff:.*0000000000000000" /proc/$(pgrep -x sleep)/status' \
-  || fail "the session process holds capabilities"
+# shellcheck disable=SC2016  # expanded inside the container, on purpose
+docker exec relayer-smoke sh -c 'for p in $(pgrep -x sleep); do grep -q "^CapEff:.*0000000000000000" /proc/$p/status || exit 1; done' \
+  || fail "a session process holds capabilities"
+if docker exec --user h-other relayer-smoke ls /work/smoke /homes/smoke >/dev/null 2>&1; then
+  fail "one heteronym can read another's folders"
+fi
 if docker exec relayer-smoke ls /work/smoke >/dev/null 2>&1; then
   fail "root in the container can read a heteronym's folder"
 fi

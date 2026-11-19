@@ -84,7 +84,8 @@ def _backend(runtime: Runtime, state: Path):
                       "isolation: none to run everything as the current user")
     if not shutil.which("setpriv"):
         return None, "isolation: users needs setpriv (util-linux)"
-    accounts = Accounts(UidMap(state / "users.json", runtime.uid_base), runtime.homes)
+    accounts = Accounts(UidMap(state / "users.json", runtime.uid_base), runtime.homes,
+                        runtime.work_root)
     return UserTmuxBackend(runtime.tmux_socket, accounts), None
 
 
@@ -106,6 +107,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     try:
         actions = plan(heteronyms, backend.list(),
                        runtime.session_hash)
+        _errors(getattr(backend, "errors", []))
     except SessionError as exc:
         _errors([str(exc)])
         return 1

@@ -362,6 +362,11 @@ def _heteronym(name: str, data: Any, templates: dict[str, Template],
         if not any(_within(path, root) for root in roots):
             errors.append(f"{where}.folders: {path!r} is outside template "
                           f"{tpl.name!r} roots {roots}")
+        elif not _within(path, work_root) or path == work_root:
+            # Homes and state live outside the work root; a folder there
+            # could be another heteronym's home (docs/SPEC.md §1.3).
+            errors.append(f"{where}.folders: {path!r} is not below the work root "
+                          f"{work_root!r}")
         folders.append(path)
 
     allow = tpl.allow

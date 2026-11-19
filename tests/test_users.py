@@ -97,7 +97,7 @@ class RealUsers(unittest.TestCase):
         for d in ("work", "homes", "state"):
             (self.root / d).mkdir(mode=0o755)
         self.accounts = Accounts(UidMap(self.root / "state" / "users.json", self.base),
-                                 str(self.root / "homes"))
+                                 str(self.root / "homes"), str(self.root / "work"))
         self.addCleanup(self.cleanup)
 
     def cleanup(self):
@@ -174,6 +174,76 @@ class RealUsers(unittest.TestCase):
                                "--inh-caps=-all", "--", "ls", str(notes)],
                               capture_output=True, text=True)
         self.assertNotEqual(peek.returncode, 0)
+
+    def test_symlink_inside_own_folder_cannot_redirect_root(self):
+        """A heteronym owns its folder and may plant anything in it. A nested
+        folder from its definition must never make root act through that."""
+        target = self.root / "target"
+        (target / "bin").mkdir(parents=True)
+        os.chmod(target, 0o755)
+        os.chmod(target / "bin", 0o755)
+        g = str(self.root / "work" / "g")
+        ident = self.accounts.prepare("g", (g,))
+        subprocess.run([*ident.as_user(), "ln", "-s", str(target), f"{g}/sub"], check=True)
+        with self.assertRaises(AccountError):
+            self.accounts.prepare("g", (g, f"{g}/sub/bin"))
+        self.assertEqual(os.stat(target / "bin").st_uid, 0)
+        self.assertEqual(os.stat(target / "bin").st_mode & 0o777, 0o755)
+
+    def test_root_never_acts_on_a_path_only_on_descriptors(self):
+        """Pins the race fix: a path can be swapped between check and use, a
+        held descriptor cannot. Root-side mkdir must be relative to a held
+        directory, and chmod/chown must go through descriptors."""
+        real_mkdir = os.mkdir
+
+        def mkdir(path, mode=0o777, *, dir_fd=None):
+            if dir_fd is None:
+                raise AssertionError(f"root mkdir by path: {path}")
+            return real_mkdir(path, mode, dir_fd=dir_fd)
+
+        def by_path(*args, **kwargs):
+            raise AssertionError(f"root chmod/chown by path: {args[0]}")
+
+        work = str(self.root / "work" / "pa")
+        with mock.patch("relayer.users.os.mkdir", mkdir), \
+                mock.patch("relayer.users.os.chmod", by_path), \
+                mock.patch("relayer.users.os.chown", by_path):
+            self.accounts.prepare("pa", (work, f"{work}/notes"))
+        self.assertEqual(os.stat(f"{work}/notes").st_uid, self.accounts.identity("pa").uid)
+
+    def test_a_stray_session_does_not_break_listing(self):
+        backend = UserTmuxBackend(f"relayer-it-{os.getpid()}", self.accounts)
+        pa = self.h("pa")
+        backend.prepare(pa)
+        backend.start("pa", "sleep 300", pa.folders[0], "ab12")
+        ident = self.accounts.identity("pa")
+        # The heteronym makes sessions of its own on its own server.
+        subprocess.run([*ident.as_user(), "env", f"HOME={ident.home}",
+                        f"TMUX_TMPDIR={ident.home}", "tmux", "-L", backend.socket,
+                        "new-session", "-d", "-s", "EVIL|x", "sleep 300"], check=True)
+        self.assertEqual(set(backend.list()), {"pa"})
+        self.assertEqual(backend.errors, [])
+
+    def test_another_heteronym_cannot_squat_the_socket_dir(self):
+        backend = UserTmuxBackend(f"relayer-it-{os.getpid()}", self.accounts)
+        pa, pb = self.h("pa"), self.h("pb")
+        backend.prepare(pa)
+        a = self.accounts.identity("pa")
+        b_uid = self.accounts.uids.base + 1          # predictable: pb is next
+        subprocess.run([*a.as_user(), "mkdir", "-m", "700", f"/tmp/tmux-{b_uid}"])
+        self.addCleanup(shutil.rmtree, f"/tmp/tmux-{b_uid}", True)
+        backend.prepare(pb)
+        self.assertEqual(self.accounts.identity("pb").uid, b_uid)
+        backend.start("pb", "sleep 300", pb.folders[0], "cd34")
+        self.assertIn("pb", backend.list())
+
+    def test_a_lost_uid_map_never_hands_files_to_a_stranger(self):
+        pz = str(self.root / "work" / "pz")
+        old = self.accounts.prepare("pz", (pz,))
+        self.accounts.uids.path.unlink()                  # state lost
+        stranger = self.accounts.identity("aa")           # sorts first, arrives first
+        self.assertNotEqual(stranger.uid, old.uid)
+        self.assertEqual(self.accounts.identity("pz").uid, old.uid)   # rebuilt from its home
 
     def test_session_runs_as_its_user_and_others_cannot_look_in(self):
         backend = UserTmuxBackend(f"relayer-it-{os.getpid()}", self.accounts)
