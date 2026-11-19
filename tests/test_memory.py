@@ -190,9 +190,15 @@ def git(cwd, *args):
 
 
 class Git(unittest.TestCase):
-    """Commit and push against a local bare origin."""
+    """Commit and push against a local bare origin, with no git identity
+    configured anywhere, as in a fresh container."""
 
     def setUp(self):
+        for k, v in (("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")):
+            old = os.environ.get(k)
+            os.environ[k] = v
+            self.addCleanup(lambda k=k, old=old: os.environ.__setitem__(k, old)
+                            if old is not None else os.environ.pop(k, None))
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
         origin = self.tmp / "origin.git"

@@ -57,7 +57,10 @@ _GITLIKE = re.compile(r"^(\.git.*|git~\d+.*)$", re.IGNORECASE)
 MAX_DEPTH = 32                      # path components in one memory path
 MAX_DIRS = 10_000                   # directories in one heteronym's memory
 _GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-             "-c", "submodule.recurse=false")
+             "-c", "submodule.recurse=false",
+             # Every command, not just commit: `pull --rebase` rewrites commits
+             # and needs a committer, and a fresh container has no git identity.
+             "-c", "user.name=pessoa-relayer", "-c", "user.email=relayer@localhost")
 
 
 class MemoryError_(RuntimeError):
@@ -433,8 +436,7 @@ class MemoryRepo:
             staged.append(name)
         if not staged or self._git("diff", "--cached", "--quiet", check=False).returncode == 0:
             return [], problems
-        self._git("-c", "user.name=pessoa-relayer", "-c", "user.email=relayer@localhost",
-                  "commit", "-q", "-m", f"memory: {', '.join(staged)} ({when})")
+        self._git("commit", "-q", "-m", f"memory: {', '.join(staged)} ({when})")
         return staged, problems
 
     def push(self) -> str | None:
