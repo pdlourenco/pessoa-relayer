@@ -19,6 +19,10 @@ from .users import processes_of
 from typing import Protocol
 
 HASH_OPTION = "@relayer_hash"
+# Every tmux call is bounded: a heteronym owns its tmux server and can stop
+# it, or put a silent listener on its socket, and an unbounded call would
+# then stall the whole class's reconcile (docs/SPEC.md §6.3).
+TMUX_TIMEOUT = 10.0
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _HASH_RE = re.compile(r"^[0-9a-f]{1,64}$")
 
@@ -40,9 +44,13 @@ class SessionError(RuntimeError):
     pass
 
 
+class SessionTimeout(SessionError):
+    """A tmux call did not finish within its time limit."""
+
+
 class TmuxBackend:
     def __init__(self, socket: str, tmux: str = "tmux", prefix: list[str] | None = None,
-                 home: str | None = None):
+                 home: str | None = None, timeout: float = TMUX_TIMEOUT):
         # ``prefix`` runs tmux as another user (setpriv), so that user owns
         # the tmux server and every session in it (docs/SPEC.md §6).
         self._base = [*(prefix or []), tmux, "-L", socket, "-f", "/dev/null"]
@@ -55,17 +63,44 @@ class TmuxBackend:
             # /tmp/tmux-<uid>, which another heteronym could create first
             # (uids are predictable) and so block this one's server.
             self._env["TMUX_TMPDIR"] = home
+        self._prefix = list(prefix or [])
+        self.timeout = timeout
+
+    def _call(self, args: tuple[str, ...]) -> subprocess.CompletedProcess:
+        argv = [*self._base, *args]
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, env=self._env)
+        try:
+            out, err = proc.communicate(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            # subprocess.run would call proc.kill() here, which fails: the
+            # client runs as the heteronym and root holds no CAP_KILL. Kill
+            # it as the user it runs as.
+            if self._prefix:
+                subprocess.run([*self._prefix, "kill", "-9", str(proc.pid)],
+                               capture_output=True)
+            else:
+                proc.kill()
+            # Wait for the process, not for end-of-file: the tmux client
+            # passes its stdout to the server, which may hold it open.
+            try:
+                proc.wait(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                pass                      # left to the caller's kill of the uid
+            for pipe in (proc.stdout, proc.stderr):
+                pipe.close()
+            raise SessionTimeout(f"tmux {' '.join(args[:2])}: no answer within "
+                                 f"{self.timeout:g}s") from None
+        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-        proc = subprocess.run([*self._base, *args], capture_output=True, text=True,
-                              env=self._env)
+        proc = self._call(args)
         if proc.returncode != 0 and "server exited unexpectedly" in proc.stderr:
             # The server was shutting down (its last session had just ended)
             # when we connected. Once it is gone the next call starts a new
             # one, so retry once.
             time.sleep(0.2)
-            proc = subprocess.run([*self._base, *args], capture_output=True, text=True,
-                                  env=self._env)
+            proc = self._call(args)
         if check and proc.returncode != 0:
             raise SessionError(f"tmux {' '.join(args[:2])}: {proc.stderr.strip()}")
         return proc
@@ -131,14 +166,17 @@ class UserTmuxBackend:
     the definitions are still found, and stopped.
     """
 
-    def __init__(self, socket: str, accounts, tmux: str = "tmux"):
+    def __init__(self, socket: str, accounts, tmux: str = "tmux",
+                 timeout: float = TMUX_TIMEOUT):
         self.socket = socket
         self.accounts = accounts
         self.tmux = tmux
+        self.timeout = timeout
         self.errors: list[str] = []     # per-heteronym listing failures, last list()
 
     def _for(self, ident) -> TmuxBackend:
-        return TmuxBackend(self.socket, self.tmux, prefix=ident.as_user(), home=ident.home)
+        return TmuxBackend(self.socket, self.tmux, prefix=ident.as_user(), home=ident.home,
+                           timeout=self.timeout)
 
     def list(self) -> dict[str, Running]:
         running: dict[str, Running] = {}
@@ -148,6 +186,18 @@ class UserTmuxBackend:
             # reconcile: record it and carry on.
             try:
                 found = self._for(ident).list(only=ident.name)
+            except SessionTimeout as exc:
+                # Its server does not answer: stopped, or its socket taken
+                # by something that never replies. Nothing it runs can be
+                # trusted to be a session; end it all, so the next pass
+                # starts it afresh if it is still wanted.
+                self.errors.append(f"sessions of {ident.name}: {exc}; ending its processes")
+                try:
+                    self._kill_all(ident)
+                except SessionError as kill_exc:
+                    self.errors.append(str(kill_exc))
+                    running[ident.name] = Running(ident.name, "", 0)
+                continue
             except Exception as exc:  # noqa: BLE001 - reported via .errors
                 self.errors.append(f"sessions of {ident.name}: {exc}")
                 continue
@@ -178,10 +228,16 @@ class UserTmuxBackend:
             pass                          # already gone, or hidden: the kill below covers it
         # kill-session ends the tmux session, not a daemon the heteronym
         # started with setsid; end everything its uid runs (docs/SPEC.md §6.3).
-        # Signal each live process of the uid by pid, as that user (root here
-        # has no CAP_KILL), and repeat: a process forking meanwhile can add a
-        # child the previous round did not see. procps kill takes "-9 PID…";
-        # it reads "-s KILL -- -1" as a usage error.
+        self._kill_all(ident)
+
+    def _kill_all(self, ident) -> None:
+        """End every process of the heteronym's uid, or raise SessionError.
+
+        Signal each live process by pid, as that user (root here has no
+        CAP_KILL), and repeat: a process forking meanwhile can add a child
+        the previous round did not see. procps kill takes "-9 PID…"; it
+        reads "-s KILL -- -1" as a usage error.
+        """
         deadline = time.time() + 5
         while time.time() < deadline:
             pids = processes_of(ident.uid)
@@ -194,4 +250,3 @@ class UserTmuxBackend:
         if left:
             raise SessionError(f"processes of {ident.user} survived the stop: "
                                + "; ".join(f"{p} {_cmdline(p)}" for p in left))
-
