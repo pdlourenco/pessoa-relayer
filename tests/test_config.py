@@ -324,6 +324,9 @@ class Rejections(unittest.TestCase):
         self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant}\n"),
                             "must name at least one trust class", {"assistant": bad})
 
+    def test_deeply_nested_yaml(self):
+        self.assertRejected("version: 1\nheteronyms: " + "[" * 5000 + "]" * 5000 + "\n", "")
+
     def test_all_errors_reported_together(self):
         ws = Workspace(heteronym_file("""\
             pa: {class: assistants, template: assistant, tier: frontier}

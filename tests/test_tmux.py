@@ -104,6 +104,14 @@ class Tmux(unittest.TestCase):
         self.backend.start("pa", shlex.join(argv), self.tmp.name, "aa")
         self.assertNotIn("evil", self.backend.list())
 
+    def test_activity_moves_with_output(self):
+        # session_activity would stay at creation time here (tmux 3.4).
+        loop = "while true; do echo tick; sleep 1; done"
+        self.backend.start("pa", shlex.join(["sh", "-c", loop]), self.tmp.name, "aa")
+        first = self.backend.list()["pa"].last_activity
+        time.sleep(2.2)
+        self.assertGreater(self.backend.list()["pa"].last_activity, first)
+
     def test_refuses_command_ending_in_separator(self):
         with self.assertRaises(SessionError):
             self.backend.start("pa", "sleep 300 ;", self.tmp.name, "aa")

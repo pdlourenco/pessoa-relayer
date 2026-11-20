@@ -140,7 +140,7 @@ def _load_yaml(path: Path) -> Any:
             return yaml.load(fh, Loader=_StrictLoader)  # noqa: S506 (strict safe loader)
     except FileNotFoundError:
         raise ConfigError([f"{path}: file not found"]) from None
-    except (yaml.YAMLError, OSError, UnicodeDecodeError) as exc:
+    except (yaml.YAMLError, OSError, UnicodeDecodeError, RecursionError) as exc:
         raise ConfigError([f"{path}: {exc}"]) from None
 
 
