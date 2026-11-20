@@ -22,4 +22,10 @@ session:
     # Each heteronym keeps its Claude settings, history and sign-in in its
     # own home, which no other heteronym can read.
     CLAUDE_CONFIG_DIR: "{home}/.claude"
+    # Where the heteronym keeps its memory; its CLAUDE.md can point here.
+    HETERONYM_MEMORY: "{memory}"
 tmux_socket: pessoa
+memory:                    # docs/SPEC.md §7; omit to run without memory
+  repo: /memory-repo       # a root-owned clone of the private memory repository
+  live: /memory            # each heteronym's own live memory: /memory/<name>
+  interval: 15m

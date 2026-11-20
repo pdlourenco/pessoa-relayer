@@ -166,11 +166,12 @@ class UserTmuxBackend:
     the definitions are still found, and stopped.
     """
 
-    def __init__(self, socket: str, accounts, tmux: str = "tmux",
+    def __init__(self, socket: str, accounts, tmux: str = "tmux", memory=None,
                  timeout: float = TMUX_TIMEOUT):
         self.socket = socket
         self.accounts = accounts
         self.tmux = tmux
+        self.memory = memory            # relayer.memory.MemoryRepo, or None
         self.timeout = timeout
         self.errors: list[str] = []     # per-heteronym listing failures, last list()
 
@@ -212,10 +213,16 @@ class UserTmuxBackend:
         return running
 
     def prepare(self, heteronym) -> None:
-        self.accounts.prepare(heteronym.name, heteronym.folders)
+        ident = self.accounts.prepare(heteronym.name, heteronym.folders)
+        if self.memory is not None:
+            self.accounts.ensure_dir(ident, self.memory.live_dir(heteronym.name))
+            self.memory.restore(ident)          # only fills an empty folder
 
     def identity(self, name: str) -> dict[str, str]:
-        return self.accounts.identity(name).env()
+        env = self.accounts.identity(name).env()
+        if self.memory is not None:
+            env["RELAYER_MEMORY"] = self.memory.live_dir(name)
+        return env
 
     def start(self, name, command, workdir, config_hash):
         ident = self.accounts.identity(name)

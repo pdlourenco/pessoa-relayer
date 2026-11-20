@@ -470,3 +470,108 @@ one case with only the three capabilities; CI runs it as root), and
 `scripts/image-smoke.sh` (the image under compose's exact capabilities: the
 session's process is `h-<name>` with no capabilities, its folders are 700,
 and root in the container cannot read them).
+
+## 7. Memory
+
+Each heteronym keeps plain-text memory it reads and updates. Memory is
+versioned in a private repository, written only by its own heteronym, and
+grants nothing: it is advice to a session, never a permission. Permissions
+come only from definitions (§1, §2).
+
+### 7.1 Shape
+
+```yaml
+memory:
+  repo: <absolute path>     # a root-owned git clone of the memory repository
+  live: <absolute path>     # default /memory; <live>/<name> per heteronym
+  interval: <duration>      # default 15m; not "never"
+```
+
+Memory needs `isolation: users` (§6). The heteronym's live folder,
+`<live>/<name>`, is prepared like its other folders (§6.2) and offered to
+its session through the `{memory}` placeholder.
+
+The clone's `.git` holds every heteronym's memory, so the clone must be
+root's alone. At start, and before every collect and restore, the
+supervisor opens `repo` without following a symlink: owned by anyone but
+root, it refuses to start; readable or enterable by anyone else, it sets
+it to mode 700. A
+`repo/.git` that is a symlink, which would keep the objects outside the
+private directory, is refused. A
+plain `git clone` on the host makes it 755 with 644 objects, and the bind
+mount hides the image's own `chmod`. The credential root pushes with must
+not be readable by any heteronym either.
+
+### 7.2 Collecting and committing
+
+Every `interval`, for each heteronym of the container's class that has a
+live folder:
+
+- its live folder is copied into `<repo>/memory/<name>/`. The supervisor
+  cannot read the live folder, so the copy is a pipe: a helper running as
+  the heteronym writes a stream of (path, bytes) records for the regular
+  files it can see, then an end marker; the supervisor writes them into a
+  staging directory. The stream is treated as hostile, since the
+  heteronym's own session can tamper with a same-uid helper:
+  - a path that is absolute, contains `..` or `:`, is not normalised, is
+    deeper than 32 components, or has a git-like component anywhere
+    (`.git` and every `.git*` name, any case, with trailing dots or spaces,
+    or any name with an NTFS short-name tail `~<digit>`, which git can read
+    as `.git`, `.gitmodules` or `.gitattributes`, such as `gitmod~1`; all
+    checked after removing Unicode format characters such as U+200C, which
+    HFS+ ignores) ends the copy, as does a
+    name the staging directory cannot hold (repeated, a file and a
+    directory of one name, too long);
+  - symlinks are never followed and git-like names are skipped by the
+    helper, so a heteronym's own odd files never block its memory;
+  - limits: 5 MB a file (skipped and logged), 50 MB, 10 000 files and
+    10 000 directories a heteronym, names counted;
+  - the staging directory replaces the saved copy only after the end
+    marker arrived and the helper exited cleanly; otherwise the saved copy
+    is unchanged;
+  - the whole transfer has one 120 s deadline: every read and write on the
+    helper's pipes waits only until it (a session holding a copy of a pipe
+    can withhold EOF forever), the helper is killed when it passes (from
+    outside the heteronym's reach, as in §6.3: root holds no `CAP_KILL`),
+    and
+    stderr is drained by a thread that keeps at most 64 KB, so a stopped,
+    hung or chatty helper cannot wedge the supervisor;
+    it starts in `/` with `python -P`, so no module in its working
+    directory can replace ours;
+  - neither `<repo>/memory` nor `<repo>/memory/<name>` may be a symlink.
+- each heteronym's folder is staged on its own (`git add`), and one that
+  git refuses, or that holds a git link, is reported and left out without
+  stopping the others. Its folder in the clone is put back to its last
+  commit, since a dirty tree would make the next `git pull --rebase`
+  refuse, blocking every push of the class; its live folder is untouched.
+  Then the clone is committed (`memory: <names> (<time>)`) and pushed. Git
+  always runs with `core.fsmonitor=false`, `core.hooksPath=/dev/null`,
+  `submodule.recurse=false`, `core.protectHFS=true` and
+  `core.protectNTFS=true`.
+
+The helper gets only `PATH`, `PYTHONPATH` and `LANG`: it runs as the
+heteronym, whose session could read a same-uid process's environment, so
+nothing of the supervisor's (git credentials, for one) reaches it.
+
+### 7.3 When a push fails
+
+A rejected push is retried once after `git pull --rebase` (other classes'
+containers push to the same repository, under other heteronyms' folders).
+If the push still fails, or the rebase conflicts, the rebase is aborted,
+the commits stay in the local clone, the problem is logged, and every later
+interval tries again. Nothing is ever force-pushed and nothing is lost
+while the clone's volume survives.
+
+### 7.4 Restoring
+
+When a heteronym's live folder is empty (a new volume), it is filled from
+`<repo>/memory/<name>/` by the same pipe the other way round, received and
+written as the heteronym, with the same checks. A live folder with anything
+in it is never overwritten, and a saved folder that is a symlink is never
+read.
+
+Verified by: `tests/test_memory.py` (stream safety, git behaviour against a
+local origin including a rejected push and a conflict, and collect and
+restore with real users, one case with only the supervisor's three
+capabilities), `tests/test_supervise.py::MemorySync`.
+

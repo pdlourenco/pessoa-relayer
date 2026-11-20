@@ -87,7 +87,14 @@ release workflow). A deployment keeps its compose file, `.env` and
    docker compose up -d
    ```
 
-5. Sign each heteronym in once, interactively, with your own subscription.
+5. For memory, clone your private memory repository, as root, into the
+   host path given as `RELAYER_MEMORY_REPO_DIR`, and give root in the
+   container a way to push to it (a read-only mounted key or credential
+   file, readable by root alone). The clone holds every heteronym's memory:
+   the supervisor refuses one root does not own and makes it mode 700
+   (docs/SPEC.md §7.1). Omit the `memory` section in `relayer.yaml` to run
+   without it.
+6. Sign each heteronym in once, interactively, with your own subscription.
    Add it with `enabled: false` so the supervisor leaves it alone, then:
 
    ```bash

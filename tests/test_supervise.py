@@ -236,5 +236,69 @@ class Loop(unittest.TestCase):
             self.assertEqual(main(["supervise", "--interval", "0"]), 1)
 
 
+
+class MemorySync(unittest.TestCase):
+    """The supervisor's memory pass, with a fake repository (SPEC §7)."""
+
+    class FakeMemory:
+        def __init__(self, root, fail=()):
+            self.root, self.fail = root, set(fail)
+            self.collected, self.commits, self.pushes = [], [], 0
+            self.push_state = type("S", (), {"blocked": None})()
+            self.push_result = None
+
+        def live_dir(self, name):
+            return str(self.root / name)
+
+        def collect(self, ident):
+            if ident.name in self.fail:
+                raise RuntimeError("dump failed")
+            self.collected.append(ident.name)
+            return []
+
+        def commit(self, names, when):
+            self.commits.append(list(names))
+            return list(names), []
+
+        def push(self):
+            self.pushes += 1
+            self.push_state.blocked = self.push_result
+            return self.push_result
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        for n in ("pa", "pb"):
+            (self.root / n).mkdir()
+        idents = [type("I", (), {"name": n})() for n in ("pa", "pb", "other")]
+        self.backend = Backend()
+        self.backend.accounts = type("A", (), {"known": lambda self_: idents})()
+        self.backend.memory = self.FakeMemory(self.root, fail={"pb"})
+        hs = {n: heteronym(n, folder=str(self.root / "w" / n)) for n in ("pa", "pb")}
+        rt = dataclasses.replace(RT, memory_repo="/r", memory_interval=600)
+        self.sup = Supervisor(self.backend, lambda: (rt, hs), ParkStore(self.root / "parked"),
+                              30, ENV)
+
+    def test_one_failure_does_not_stop_the_others(self):
+        log = self.sup.tick(T0)
+        self.assertEqual(self.backend.memory.collected, ["pa"])     # "other" is not this class's
+        self.assertIn("memory pb: dump failed", log)
+        self.assertEqual(self.backend.memory.commits, [["pa"]])
+        self.assertIn("memory: committed pa", log)
+
+    def test_runs_once_per_interval(self):
+        self.sup.tick(T0)
+        self.sup.tick(T0 + 300)
+        self.assertEqual(len(self.backend.memory.commits), 1)
+        self.sup.tick(T0 + 600)
+        self.assertEqual(len(self.backend.memory.commits), 2)
+
+    def test_push_failure_is_logged_and_kept(self):
+        self.backend.memory.push_result = "push failed: offline"
+        log = self.sup.tick(T0)
+        self.assertIn("memory: not pushed, kept locally: push failed: offline", log)
+
+
 if __name__ == "__main__":
     unittest.main()

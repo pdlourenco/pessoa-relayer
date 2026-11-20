@@ -13,6 +13,12 @@ services:
       - ${RELAYER_HOMES_DIR:?host path for heteronym homes, with their Claude config and sign-in}:/homes
       - ${RELAYER_WORK_DIR:?host path for heteronym workspaces}:/work
       - ${RELAYER_STATE_DIR:?host path for supervisor state}:/state
+      # Memory (docs/SPEC.md §7): a root-owned clone of the private memory
+      # repository, and the live folders the heteronyms write. The clone's
+      # push credentials are the deployment's to provide, for example a
+      # read-only mounted SSH key or git credential file for root.
+      - ${RELAYER_MEMORY_REPO_DIR:?host path of the memory repository clone}:/memory-repo
+      - ${RELAYER_MEMORY_DIR:?host path for heteronyms' live memory}:/memory
     mem_limit: ${RELAYER_MEM_LIMIT:-4g}
     # No Docker socket, no privileged mode. The supervisor is root in the
     # container with only the three capabilities it needs to create one Unix

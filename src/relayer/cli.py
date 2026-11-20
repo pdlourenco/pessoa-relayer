@@ -12,6 +12,7 @@ from .config import ConfigError, load_heteronyms, load_templates
 from .reconcile import apply, plan
 from .runtime import Runtime, check_environment, load_runtime
 from .sessions import SessionError, TmuxBackend, UserTmuxBackend
+from .memory import MemoryError_, MemoryRepo
 from .users import Accounts, UidMap
 from .supervise import ParkStore, Supervisor, check_state_dir, run
 
@@ -84,9 +85,23 @@ def _backend(runtime: Runtime, state: Path):
                       "isolation: none to run everything as the current user")
     if not shutil.which("setpriv"):
         return None, "isolation: users needs setpriv (util-linux)"
+    # The memory live root holds heteronym-owned folders too: a lost uid map
+    # must see their owners before handing out a uid (docs/SPEC.md §6.1),
+    # even after the memory section is removed and its folders stay.
     accounts = Accounts(UidMap(state / "users.json", runtime.uid_base), runtime.homes,
-                        runtime.work_root)
-    return UserTmuxBackend(runtime.tmux_socket, accounts), None
+                        runtime.work_root, other_roots=(runtime.memory_live,))
+    memory = None
+    if runtime.memory_repo is not None:
+        dotgit = Path(runtime.memory_repo) / ".git"
+        if dotgit.is_symlink() or not dotgit.is_dir():
+            return None, (f"memory.repo {runtime.memory_repo} is not a git clone; clone "
+                          "the memory repository there first (docs/SPEC.md §7)")
+        memory = MemoryRepo(Path(runtime.memory_repo), Path(runtime.memory_live))
+        try:
+            memory.secure()
+        except MemoryError_ as exc:
+            return None, str(exc)
+    return UserTmuxBackend(runtime.tmux_socket, accounts, memory=memory), None
 
 
 def cmd_reconcile(args: argparse.Namespace) -> int:
