@@ -408,15 +408,65 @@ class RealUsers(unittest.TestCase):
         from relayer.users import kill_as
         pa = self.accounts.prepare("pa", ())
         pb = self.accounts.prepare("pb", ())
-        root_sleep = subprocess.Popen(["sleep", "60"])
-        b_sleep = subprocess.Popen([*pb.as_user(), "sleep", "60"])
-        a_sleep = subprocess.Popen([*pa.as_user(), "sleep", "60"])
-        self.addCleanup(lambda: [p.kill() for p in (root_sleep, b_sleep, a_sleep)])
-        time.sleep(0.2)
+        root_sleep, b_sleep, a_sleep = self._sleepers(pa, pb)
         kill_as(pa.uid, [root_sleep.pid, b_sleep.pid, a_sleep.pid])
         self.assertEqual(a_sleep.wait(timeout=5), -9)      # the control: pa's own
         self.assertIsNone(root_sleep.poll(), "kill_as killed a root process")
         self.assertIsNone(b_sleep.poll(), "kill_as killed another heteronym's process")
+
+    def _sleepers(self, pa, pb):
+        """A sleep each as root, pb and pa, once setpriv has switched uid."""
+        from relayer.users import _real_uid
+        procs = (subprocess.Popen(["sleep", "60"]),
+                 subprocess.Popen([*pb.as_user(), "sleep", "60"]),
+                 subprocess.Popen([*pa.as_user(), "sleep", "60"]))
+
+        def reap():
+            for p in procs:
+                p.kill()
+                p.wait()
+        self.addCleanup(reap)
+        deadline = time.time() + 5
+        while time.time() < deadline and (_real_uid(procs[1].pid), _real_uid(procs[2].pid)) \
+                != (pb.uid, pa.uid):
+            time.sleep(0.02)
+        return procs
+
+    def test_kill_as_without_pidfds_still_checks_the_uid(self):
+        """Second review: where pidfd_open fails (old kernel, seccomp), kill_as
+        must neither do nothing nor kill another uid's process."""
+        from relayer.users import kill_as
+        pa = self.accounts.prepare("pa", ())
+        pb = self.accounts.prepare("pb", ())
+        root_sleep, b_sleep, a_sleep = self._sleepers(pa, pb)
+        with mock.patch("relayer.users.os.pidfd_open", side_effect=OSError(38, "ENOSYS")):
+            kill_as(pa.uid, [root_sleep.pid, b_sleep.pid, a_sleep.pid])
+        self.assertEqual(a_sleep.wait(timeout=5), -9)
+        self.assertIsNone(root_sleep.poll(), "killed a root process")
+        self.assertIsNone(b_sleep.poll(), "killed another heteronym's process")
+
+    def test_a_process_whose_main_thread_exited_is_still_live(self):
+        """Second review: such a leader shows state Z while its threads run;
+        it must not hide from processes_of, and so from a stop."""
+        from relayer.users import kill_as
+        pa = self.accounts.prepare("pa", ())
+        script = ("import ctypes, threading, time\n"
+                  "threading.Thread(target=time.sleep, args=(300,)).start()\n"
+                  "ctypes.CDLL(None).pthread_exit(None)\n")
+        proc = subprocess.Popen([*pa.as_user(), "python3", "-c", script])
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        deadline, state = time.time() + 5, ""
+        while time.time() < deadline:
+            with open(f"/proc/{proc.pid}/status") as fh:
+                status = fh.read()
+            if "State:\tZ" in status and "Threads:\t2" in status:
+                state = "threaded zombie leader"
+                break
+            time.sleep(0.02)
+        self.assertEqual(state, "threaded zombie leader")
+        self.assertIn(proc.pid, processes_of(pa.uid))
+        kill_as(pa.uid, processes_of(pa.uid))
+        self.assertEqual(proc.wait(timeout=5), -9)
 
     def test_a_command_run_as_the_heteronym_is_bounded(self):
         ident = self.accounts.prepare("pa", ())

@@ -158,5 +158,22 @@ class Timeout(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 5)
 
 
+
+class KillChild(unittest.TestCase):
+    """A child we started is root's until setpriv switches uid, then the
+    heteronym's: kill_child must reach it either way."""
+
+    def test_tries_both_ways(self):
+        from relayer.users import kill_child
+        for kill_error in (None, PermissionError(1, "EPERM")):
+            with self.subTest(kill_error=kill_error):
+                proc = mock.Mock(pid=4242)
+                proc.kill.side_effect = kill_error
+                as_user = mock.Mock()
+                kill_child(proc, as_user)
+                proc.kill.assert_called_once()
+                as_user.assert_called_once_with([4242])
+
+
 if __name__ == "__main__":
     unittest.main()

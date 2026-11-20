@@ -15,7 +15,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 
-from .users import kill_as, processes_of
+from .users import kill_as, kill_child, processes_of
 from typing import Protocol
 
 HASH_OPTION = "@relayer_hash"
@@ -78,7 +78,7 @@ class TmuxBackend:
             # subprocess.run would call proc.kill() here, which fails: the
             # client runs as the heteronym and root holds no CAP_KILL.
             if self._kill is not None:
-                self._kill([proc.pid])
+                kill_child(proc, self._kill)
             else:
                 proc.kill()
             # Wait for the process, not for end-of-file: the tmux client
