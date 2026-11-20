@@ -167,12 +167,22 @@ class KillChild(unittest.TestCase):
         from relayer.users import kill_child
         for kill_error in (None, PermissionError(1, "EPERM")):
             with self.subTest(kill_error=kill_error):
-                proc = mock.Mock(pid=4242)
+                proc = mock.Mock(pid=4242, returncode=None)
                 proc.kill.side_effect = kill_error
                 as_user = mock.Mock()
                 kill_child(proc, as_user)
                 proc.kill.assert_called_once()
                 as_user.assert_called_once_with([4242])
+
+    def test_a_reaped_child_is_not_signalled_by_pid(self):
+        """Once proc.kill() has reaped it, the pid may belong to anyone."""
+        from relayer.users import kill_child
+        proc = subprocess.Popen(["true"])
+        time.sleep(0.2)                       # exited, not yet reaped
+        as_user = mock.Mock()
+        kill_child(proc, as_user)
+        self.assertEqual(proc.returncode, 0)  # reaped by proc.kill()'s poll
+        as_user.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -356,9 +356,11 @@ def kill_child(proc: subprocess.Popen, kill) -> None:
     which ``proc.kill()`` reaches and ``kill`` (:func:`kill_as`) refuses;
     after the switch, the other way round. Try both."""
     try:
-        proc.kill()
+        proc.kill()                       # polls first: may reap an exited child
     except PermissionError:
         pass
+    if proc.returncode is not None:
+        return                            # reaped: its pid is no longer ours
     kill([proc.pid])
 
 
