@@ -51,8 +51,8 @@ seed version it targets.
 
 Early. Planned components, each landing as its own small PR:
 
-1. `heteronyms.yaml` and template format, with a validator
-2. reconciler: running sessions against `heteronyms.yaml`
+1. `heteronyms.yaml` and template format, with a validator (`relayer validate`)
+2. reconciler: running sessions against `heteronyms.yaml` (`relayer reconcile`)
 3. session supervisor
 4. container image and an example compose file
 

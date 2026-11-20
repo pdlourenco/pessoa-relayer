@@ -281,7 +281,7 @@ class Rejections(unittest.TestCase):
 
     def test_malformed_inputs_raise_config_error(self):
         cases = {
-            "template is a list": heteronym_file("pa: {template: [assistant]}\n"),
+            "template is a list": heteronym_file("pa: {class: assistants, template: [assistant]}\n"),
             "non-scalar key": "version: 1\nheteronyms:\n  ? [a]\n  : 1\n",
         }
         for label, body in cases.items():
@@ -297,6 +297,19 @@ class Rejections(unittest.TestCase):
         templates = load_templates(ws.root / "templates")
         with self.assertRaises(ConfigError):
             load_heteronyms(ws.root, templates)
+
+    def test_folder_characters_tmux_would_interpret(self):
+        # tmux expands #(cmd) in a start directory; ";" splits its commands.
+        for folder in ("{work}/{name}/#(id)", "{work}/{name}/a;b", "{work}/{name}/a b",
+                       "{work}/{name}/a\\nb"):
+            with self.subTest(folder=folder):
+                self.assertRejected(
+                    heteronym_file(f"pa: {{class: assistants, template: assistant, folders: [\"{folder}\"]}}\n"),
+                    "has characters outside")
+
+    def test_work_root_unsafe_characters(self):
+        self.assertRejected(heteronym_file("pa: {class: assistants, template: assistant}\n"),
+                            "work root", work_root="/w#x")
 
     def test_class_required(self):
         self.assertRejected(heteronym_file("pa: {template: assistant}\n"),
@@ -392,6 +405,7 @@ class TrustClass(unittest.TestCase):
         hs = self.load(ws, None)
         a = dataclasses.replace(hs["pa"], klass="ops")
         self.assertNotEqual(hs["pa"].config_hash(), a.config_hash())
+
 
 
 if __name__ == "__main__":
