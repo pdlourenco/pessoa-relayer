@@ -44,6 +44,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterator
 
+from .users import kill_child
+
 MAGIC = b"RLMEM2\n"
 MAX_FILE = 5 * 1024 * 1024          # one file; larger ones are skipped
 MAX_TOTAL = 50 * 1024 * 1024        # one heteronym's memory, names included
@@ -520,11 +522,11 @@ class MemoryRepo:
 
 
 def _kill(proc: subprocess.Popen, kill) -> None:
-    """Kill a helper with ``kill([pid])``, then reap it."""
+    """Kill a helper (relayer.users.kill_child with ``kill``), then reap it."""
     if proc.poll() is None:
         # Until it is reaped, the pid cannot be reused: this signals the
         # helper or nothing.
-        kill([proc.pid])
+        kill_child(proc, kill)
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
