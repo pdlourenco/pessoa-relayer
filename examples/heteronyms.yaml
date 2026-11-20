@@ -1,0 +1,21 @@
+# Example heteronyms.yaml. Copy it next to your deployment and replace the chat
+# identifiers; nothing here is specific to one host (docs/SPEC.md §1). In a
+# deployment this file lives in a private definitions repository, mounted
+# read-only; each container loads only its own trust class.
+version: 1
+heteronyms:
+  pa:
+    class: assistants
+    template: assistant
+    channel:
+      kind: signal
+      chat: "group.REPLACE-WITH-GROUP-ID"
+  dev-example:
+    class: dev
+    template: developer
+    tier: strong
+    folders: ["{work}/dev-example"]
+    channel:
+      kind: signal
+      chat: "group.REPLACE-WITH-ANOTHER-GROUP-ID"
+    enabled: false
