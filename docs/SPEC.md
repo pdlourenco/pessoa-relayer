@@ -487,9 +487,10 @@ Memory needs `isolation: users` (§6). The heteronym's live folder,
 its session through the `{memory}` placeholder.
 
 The clone's `.git` holds every heteronym's memory, so the clone must be
-root's alone. At start and before every collect, the supervisor opens
-`repo` without following a symlink: owned by anyone but root, it refuses
-to start; readable or enterable by anyone else, it sets it to mode 700. A
+root's alone. At start, and before every collect and restore, the
+supervisor opens `repo` without following a symlink: owned by anyone but
+root, it refuses to start; readable or enterable by anyone else, it sets
+it to mode 700. A
 `repo/.git` that is a symlink, which would keep the objects outside the
 private directory, is refused. A
 plain `git clone` on the host makes it 755 with 644 objects, and the bind

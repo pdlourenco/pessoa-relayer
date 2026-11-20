@@ -433,6 +433,7 @@ class MemoryRepo:
 
     def restore(self, ident) -> bool:
         """Fill an empty live folder from the clone; False if nothing to do."""
+        self.secure()                    # prepare runs this before any collect
         root = self.repo / self.subdir
         src = root / ident.name
         if root.is_symlink() or src.is_symlink() or not src.is_dir():

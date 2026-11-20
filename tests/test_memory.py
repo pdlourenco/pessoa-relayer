@@ -449,6 +449,13 @@ class Helper(unittest.TestCase):
         self.repo._memory_root()                    # every collect secures it again
         self.assertEqual(os.stat(repo).st_mode & 0o777, 0o700)
 
+    def test_restore_secures_the_clone_even_with_nothing_saved(self):
+        """Re-probe of #7: prepare() runs restore() before any collect."""
+        repo = self.tmp / "repo"
+        os.chmod(repo, 0o755)
+        self.assertFalse(self.repo.restore(FakeIdent("nobody")))
+        self.assertEqual(os.stat(repo).st_mode & 0o777, 0o700)
+
     def test_stderr_flood_does_not_wedge(self):
         self.with_helper(f"""
             import sys
