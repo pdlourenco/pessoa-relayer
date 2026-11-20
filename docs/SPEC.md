@@ -379,7 +379,10 @@ are owned by its user, mode 700.
   stopped by it before it signals. So signals come from a forked child
   that takes the heteronym's uid as its effective uid only, keeping real
   and saved uid 0: the kernel lets it signal the heteronym's processes,
-  and the heteronym can neither signal nor trace it.
+  and the heteronym can neither signal nor trace it. Real uid 0 would also
+  let it signal any root process, so each target is pinned with a pidfd
+  and signalled only if its real uid is the heteronym's; a pid reused
+  between listing and signalling is never hit.
 - A heteronym whose uid has processes but no recognisable session (it
   renamed or re-tagged its session, or left a daemon) is listed as running
   with no hash, so it is stopped or restarted like any other.

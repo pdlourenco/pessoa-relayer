@@ -402,6 +402,22 @@ class RealUsers(unittest.TestCase):
             time.sleep(0.5)                       # the stopper has frozen the server
         self._assert_listing_survives(stop_everything)
 
+    def test_kill_as_reaches_only_the_heteronyms_processes(self):
+        """Re-probe of #6: the killing child keeps real uid 0, which the kernel
+        lets signal any root process; kill_as must still hit only uid's."""
+        from relayer.users import kill_as
+        pa = self.accounts.prepare("pa", ())
+        pb = self.accounts.prepare("pb", ())
+        root_sleep = subprocess.Popen(["sleep", "60"])
+        b_sleep = subprocess.Popen([*pb.as_user(), "sleep", "60"])
+        a_sleep = subprocess.Popen([*pa.as_user(), "sleep", "60"])
+        self.addCleanup(lambda: [p.kill() for p in (root_sleep, b_sleep, a_sleep)])
+        time.sleep(0.2)
+        kill_as(pa.uid, [root_sleep.pid, b_sleep.pid, a_sleep.pid])
+        self.assertEqual(a_sleep.wait(timeout=5), -9)      # the control: pa's own
+        self.assertIsNone(root_sleep.poll(), "kill_as killed a root process")
+        self.assertIsNone(b_sleep.poll(), "kill_as killed another heteronym's process")
+
     def test_a_command_run_as_the_heteronym_is_bounded(self):
         ident = self.accounts.prepare("pa", ())
         subprocess.run([*ident.as_user(), "setsid", "-f", "python3", "-c", STOPPER],

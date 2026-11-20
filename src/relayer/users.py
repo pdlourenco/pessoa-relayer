@@ -277,39 +277,61 @@ class Accounts:
 
 
 def kill_as(uid: int, pids) -> None:
-    """Send SIGKILL to ``pids``, all processes of ``uid``, from a process the
-    heteronym cannot touch.
+    """Send SIGKILL to those of ``pids`` that are processes of ``uid``, from a
+    process the heteronym cannot touch.
 
     Root here holds no CAP_KILL. A `kill` command run as the heteronym would
     have the right uid, but the heteronym could stop it (SIGSTOP) before it
     signals, and the caller would wait forever. So a forked child sets only
-    its *effective* uid to ``uid``, keeping real and saved uid 0: the kernel
-    lets it signal processes whose real or saved uid is ``uid``, while the
-    heteronym, matching neither of the child's real or saved uid, can
-    neither signal it nor trace it. Not root: we already are the user.
+    its *effective* uid to ``uid``, keeping real and saved uid 0: the
+    heteronym, matching neither, can neither signal nor trace it.
+
+    Its real uid 0 also lets it signal every root process, so each target
+    is pinned first: a pidfd refers to one process and cannot be redirected
+    to a reused pid, and the signal is sent only if that process's real uid
+    is ``uid``. If the pinned process has gone by the time its uid is read,
+    the pidfd signal fails: it never reaches whatever reuses the pid.
     """
     pids = [int(p) for p in pids]
     if not pids:
         return
     if os.geteuid() != 0:
-        for pid in pids:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+        _signal_pinned(uid, pids)       # we are the user: nothing else is reachable
         return
     child = os.fork()
     if child == 0:                        # pragma: no cover - runs in the child
         try:
             os.setresuid(0, uid, 0)
-            for pid in pids:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
+            _signal_pinned(uid, pids)
         finally:
             os._exit(0)
     os.waitpid(child, 0)
+
+
+def _real_uid(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/status") as fh:
+            for line in fh:
+                if line.startswith("Uid:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _signal_pinned(uid: int, pids: list[int]) -> None:
+    for pid in pids:
+        try:
+            fd = os.pidfd_open(pid)
+        except OSError:
+            continue                      # already gone
+        try:
+            if _real_uid(pid) == uid:
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
 
 
 def run_as(ident: Identity, argv: list[str], timeout: float = AS_USER_TIMEOUT) -> None:
