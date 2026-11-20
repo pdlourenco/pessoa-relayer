@@ -296,7 +296,7 @@ def kill_as(uid: int, pids) -> None:
     if not pids:
         return
     if os.geteuid() != 0:
-        _signal_pinned(uid, pids)       # we are the user: nothing else is reachable
+        _signal_pinned(uid, pids)       # not root: we are the user (isolation: none)
         return
     child = os.fork()
     if child == 0:                        # pragma: no cover - runs in the child
@@ -309,11 +309,17 @@ def kill_as(uid: int, pids) -> None:
 
 
 def _real_uid(pid: int) -> int | None:
+    # Plain os.open/os.read: this runs in a child forked from a threaded
+    # process, so it keeps to simple system calls.
     try:
-        with open(f"/proc/{pid}/status") as fh:
-            for line in fh:
-                if line.startswith("Uid:"):
-                    return int(line.split()[1])
+        fd = os.open(f"/proc/{pid}/status", os.O_RDONLY)
+        try:
+            data = os.read(fd, 8192)
+        finally:
+            os.close(fd)
+        for line in data.split(b"\n"):
+            if line.startswith(b"Uid:"):
+                return int(line.split()[1])
     except (OSError, ValueError, IndexError):
         pass
     return None
@@ -323,8 +329,18 @@ def _signal_pinned(uid: int, pids: list[int]) -> None:
     for pid in pids:
         try:
             fd = os.pidfd_open(pid)
-        except OSError:
+        except ProcessLookupError:
             continue                      # already gone
+        except OSError:
+            # No pidfds here (a kernel before 5.3, or a seccomp profile
+            # without pidfd_open): check, then signal by pid. Not pinned,
+            # but still never a process of another uid at the check.
+            try:
+                if _real_uid(pid) == uid:
+                    os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            continue
         try:
             if _real_uid(pid) == uid:
                 signal.pidfd_send_signal(fd, signal.SIGKILL)
@@ -332,6 +348,18 @@ def _signal_pinned(uid: int, pids: list[int]) -> None:
             pass
         finally:
             os.close(fd)
+
+
+def kill_child(proc: subprocess.Popen, kill) -> None:
+    """Kill a child we started and have not reaped (so its pid cannot be
+    reused). Until setpriv has switched to the heteronym it is still root's,
+    which ``proc.kill()`` reaches and ``kill`` (:func:`kill_as`) refuses;
+    after the switch, the other way round. Try both."""
+    try:
+        proc.kill()
+    except PermissionError:
+        pass
+    kill([proc.pid])
 
 
 def run_as(ident: Identity, argv: list[str], timeout: float = AS_USER_TIMEOUT) -> None:
@@ -345,7 +373,7 @@ def run_as(ident: Identity, argv: list[str], timeout: float = AS_USER_TIMEOUT) -
         try:
             code = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            kill_as(ident.uid, [proc.pid])
+            kill_child(proc, ident.kill)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -370,7 +398,9 @@ def processes_of(uid: int) -> list[int]:
     """Live PIDs whose real uid is ``uid`` (readable from /proc by anyone).
 
     Zombies are left out: killed but not yet reaped by their parent, they
-    run nothing and hold nothing but a process-table entry.
+    run nothing and hold nothing but a process-table entry. A leader whose
+    main thread has exited also shows state Z while its other threads run
+    on; that one is live, and counted.
     """
     pids = []
     for entry in os.scandir("/proc"):
@@ -379,7 +409,8 @@ def processes_of(uid: int) -> list[int]:
         try:
             with open(f"/proc/{entry.name}/status") as fh:
                 fields = dict(line.split(":", 1) for line in fh if ":" in line)
-            if fields["State"].split()[0] in ("Z", "X"):
+            if fields["State"].split()[0] in ("Z", "X") and \
+                    int(fields.get("Threads", "1").split()[0]) <= 1:
                 continue
             if int(fields["Uid"].split()[0]) == uid:
                 pids.append(int(entry.name))
