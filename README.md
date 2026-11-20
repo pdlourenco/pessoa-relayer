@@ -67,40 +67,43 @@ release workflow). A deployment keeps its compose file, `.env` and
 `.env.example` show the shape.
 
 1. Copy `.env.example` to `.env` and pin `RELAYER_IMAGE_TAG` to an exact
-   release. Fill in the host paths. Create the Claude, work and state
-   directories yourself and give them to uid/gid 1000, the image's user: if
-   compose creates a missing one, it is owned by root and the container
-   cannot write it. Back up those three.
+   release. Fill in the host paths. The homes, work and state directories
+   stay owned by root; the supervisor gives each heteronym its own Unix user
+   and folders inside them (docs/SPEC.md §6). Back up those three.
 2. Mount your private definitions repository (`heteronyms.yaml` and
    `templates/`) read-only at `/definitions`. Check it whole, including the
    cross-class checks, with `relayer validate` and no `--class`.
 3. Write one `relayer.yaml` per container, starting from
    `examples/relayer.yaml`; its `class` picks the heteronyms that container
-   runs. Keep `CLAUDE_CONFIG_DIR`, `DISABLE_AUTOUPDATER` and
-   `DISABLE_UPDATES` in its `pass_env`: sessions inherit nothing else, and
-   without `CLAUDE_CONFIG_DIR` they would not find the sign-in.
-4. Check the configuration inside the image, then sign in once,
-   interactively, with your own subscription:
+   runs. Keep `CLAUDE_CONFIG_DIR: "{home}/.claude"` in its `env` and the
+   two update switches in its `pass_env`: sessions inherit nothing else.
+4. Check the configuration inside the image and start the supervisor:
 
    ```bash
    docker compose run --rm assistants relayer validate
    ```
 
    ```bash
-   docker compose run --rm assistants claude
-   ```
-
-   Complete the login, confirm `/status` shows your plan rather than an API
-   key, and exit. The sign-in lives in the Claude directory you mounted.
-5. Start the supervisor:
-
-   ```bash
    docker compose up -d
    ```
 
+5. Sign each heteronym in once, interactively, with your own subscription.
+   Add it with `enabled: false` so the supervisor leaves it alone, then:
+
+   ```bash
+   docker compose exec assistants relayer login pa
+   ```
+
+   This runs the heteronym's own session command as its own user. Sign in
+   with `/login`, trust the workspace, accept the Remote Control prompt,
+   confirm `/status` shows your plan rather than an API key, and exit. The
+   sign-in lives in that heteronym's own home. Then set `enabled: true`;
+   docs/SPEC.md §6.6 has the check that Remote Control reaches it.
+
 Network settings (`network_mode`, `networks`) depend on the host: put them
-in a compose override file. The container gets no Docker socket, no
-privileged mode and no extra capabilities.
+in a compose override file. The container gets no Docker socket and no
+privileged mode; the supervisor keeps only `CHOWN`, `SETUID` and `SETGID`,
+which it needs to create one user per heteronym (docs/SPEC.md §6.4).
 
 Updating Claude Code means a new release: bump `.claude-code-version` in a
 PR (CI tests that exact version), tag, and move the deployment's pinned tag.

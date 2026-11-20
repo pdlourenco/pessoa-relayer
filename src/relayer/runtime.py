@@ -15,11 +15,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import (NAME_RE, ConfigError, Heteronym, _is_version, _load_yaml,
-                     _unknown_keys)
+from .config import (NAME_RE, SAFE_PATH_RE, ConfigError, Heteronym, _is_version,
+                     _load_yaml, _unknown_keys)
 from .tiers import TIERS
 
-RUNTIME_KEYS = {"version", "class", "work_root", "models", "session", "tmux_socket"}
+RUNTIME_KEYS = {"version", "class", "work_root", "models", "session", "tmux_socket",
+                "isolation", "homes", "uid_base"}
+ISOLATION = ("users", "none")
+ENV_PLACEHOLDERS = {"home", "name", "user"}
 SESSION_KEYS = {"command", "env", "pass_env"}
 PLACEHOLDERS = {"model", "name", "workdir", "settings"}
 SOCKET_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -43,13 +46,26 @@ class Runtime:
     env: dict[str, str] = field(default_factory=dict)
     pass_env: tuple[str, ...] = ()
     tmux_socket: str = "pessoa"
+    isolation: str = "users"        # "users": one Unix user per heteronym (SPEC §6)
+    homes: str = "/homes"
+    uid_base: int = 20000
 
-    def session_env(self, environ: dict[str, str]) -> dict[str, str]:
-        """The whole environment a session gets; nothing else is inherited."""
+    def session_env(self, environ: dict[str, str],
+                    identity: dict[str, str] | None = None) -> dict[str, str]:
+        """The whole environment a session gets; nothing else is inherited.
+
+        ``identity`` (HOME, USER, LOGNAME of the heteronym's own user)
+        replaces the supervisor's; ``env`` values may use {home}, {name}
+        and {user}.
+        """
         env = {k: environ[k] for k in BASE_ENV if k in environ}
+        env.update(identity or {})
         env["TERM"] = DEFAULT_TERM
         env.update({k: environ[k] for k in self.pass_env if k in environ})
-        env.update(self.env)
+        values = {"home": env.get("HOME", ""), "user": env.get("USER", ""),
+                  "name": (identity or {}).get("USER", "").removeprefix("h-")}
+        env.update({k: re.sub(r"\{(\w+)\}", lambda m: values[m.group(1)], v)
+                    for k, v in self.env.items()})
         if not env.get("PATH"):
             # env -i would fall back to a libc default PATH, the agent binary
             # would not be found, and the session would die unreported.
@@ -57,14 +73,16 @@ class Runtime:
                              "environment or in relayer.yaml session.env")
         return env
 
-    def session_command(self, heteronym: Heteronym, environ: dict[str, str]) -> str:
+    def session_command(self, heteronym: Heteronym, environ: dict[str, str],
+                        identity: dict[str, str] | None = None) -> str:
         """One shell-quoted string: ``env -i NAME=value … <argv>``.
 
         tmux hands a single string to ``sh -c``; shlex quoting means no
         argument can become shell syntax, and a quoted string never ends in
         the bare ";" tmux treats as a command separator.
         """
-        assignments = [f"{k}={v}" for k, v in sorted(self.session_env(environ).items())]
+        assignments = [f"{k}={v}" for k, v in
+                       sorted(self.session_env(environ, identity).items())]
         return shlex.join(["env", "-i", *assignments, *self.session_argv(heteronym)])
 
     def session_hash(self, heteronym: Heteronym) -> str:
@@ -78,7 +96,7 @@ class Runtime:
         shape = {"heteronym": heteronym.config_hash(), "model": self.models[heteronym.tier],
                  "command": list(self.command), "env": self.env,
                  "pass_env": list(self.pass_env), "base": list(BASE_ENV),
-                 "term": DEFAULT_TERM}
+                 "term": DEFAULT_TERM, "isolation": self.isolation}
         blob = json.dumps(shape, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
@@ -159,15 +177,31 @@ def load_runtime(path: Path) -> Runtime:
                               "run on the signed-in subscription (docs/SPEC.md §3.2)")
         if command and "=" in command[0]:
             errors.append(f"{where}.session.command: the program name may not contain '='")
+        for key, value in env.items():
+            for name in re.findall(r"\{(\w*)\}", value):
+                if name not in ENV_PLACEHOLDERS:
+                    errors.append(f"{where}.session.env.{key}: unknown placeholder "
+                                  f"{{{name}}} (known: {', '.join(sorted(ENV_PLACEHOLDERS))})")
 
     socket = data.get("tmux_socket", "pessoa")
     if not isinstance(socket, str) or not SOCKET_RE.match(socket):
         errors.append(f"{where}.tmux_socket: must match {SOCKET_RE.pattern}")
 
+    isolation = data.get("isolation", "users")
+    if isolation not in ISOLATION:
+        errors.append(f"{where}.isolation: must be one of {', '.join(ISOLATION)}")
+    homes = data.get("homes", "/homes")
+    if not isinstance(homes, str) or not SAFE_PATH_RE.match(homes) or homes == "/":
+        errors.append(f"{where}.homes: must be an absolute path using [A-Za-z0-9._@+-/]")
+    uid_base = data.get("uid_base", 20000)
+    if type(uid_base) is not int or not 1000 <= uid_base <= 2**31 - 100000:
+        errors.append(f"{where}.uid_base: must be an integer from 1000")
+
     if errors:
         raise ConfigError(errors)
     return Runtime(klass=klass, work_root=work_root, models=dict(models), command=tuple(command),
-                   env=dict(env), pass_env=tuple(pass_env), tmux_socket=socket)
+                   env=dict(env), pass_env=tuple(pass_env), tmux_socket=socket,
+                   isolation=isolation, homes=homes, uid_base=uid_base)
 
 
 def check_environment(environ: dict[str, str]) -> list[str]:

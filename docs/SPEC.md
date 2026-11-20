@@ -32,8 +32,9 @@ heteronyms:
     enabled: true | false          # default: true
 ```
 
-- `<name>` matches `^[a-z][a-z0-9-]{0,31}$`. It names the session and is
-  substituted for `{name}` in folder patterns.
+- `<name>` matches `^[a-z][a-z0-9-]{0,29}$`. It names the session and the
+  heteronym's Unix user (`h-<name>`, within Linux's 32 characters, §6), and
+  is substituted for `{name}` in folder patterns.
 - `<tier>` is one of `fast`, `standard`, `strong`, `frontier`, the abstract
   tiers of disciplined-project-seed (draft ADR-0020). The runtime maps tiers
   to models; heteronyms never name a model.
@@ -68,8 +69,10 @@ see the others, so this cross-class check runs when the whole file is
 validated (`relayer validate` with no `--class`), for example in the
 definitions repository's own CI.
 
-Paths are compared after collapsing repeated leading slashes (`//work` is
-`/work`). No folder may resolve to `/`, and the work root must be an
+Every folder must lie below the work root (not equal to it): homes and the
+supervisor's state live elsewhere, and a folder there could be another
+heteronym's home. Paths are compared after collapsing repeated leading
+slashes (`//work` is `/work`). No folder may resolve to `/`, and the work root must be an
 absolute, normalised path below `/` without `{` or `}`.
 
 Verified by: `tests/test_config.py::Rejections` (`test_overlapping_heteronyms`,
@@ -183,6 +186,9 @@ session:
   pass_env: [<NAME>, …]         # variables copied from the supervisor's environment
   env: {<NAME>: <value>, …}     # literal variables for every session
 tmux_socket: <name>             # default pessoa; [A-Za-z0-9_-]{1,64}
+isolation: users | none         # default users (§6)
+homes: <absolute path>          # default /homes: each heteronym's home (§6)
+uid_base: <integer>             # default 20000: first uid handed out (§6)
 ```
 
 `command` arguments may contain these placeholders, and no others:
@@ -193,6 +199,10 @@ tmux_socket: <name>             # default pessoa; [A-Za-z0-9_-]{1,64}
 | `{name}` | the heteronym name |
 | `{workdir}` | the heteronym's first folder |
 | `{settings}` | `{"permissions":{"allow":[…],"deny":[…]}}`, the heteronym's resolved lists as compact JSON |
+
+Values in `env` may use `{home}`, `{name}` and `{user}`, the heteronym's own
+home, name and Unix user; for Claude Code, `CLAUDE_CONFIG_DIR: "{home}/.claude"`
+keeps each heteronym's settings, history and sign-in in its own home.
 
 For Claude Code, `--settings {settings}` passes the caps at launch; the tool
 merges them with the workspace's own settings (§2.3).
@@ -210,9 +220,11 @@ neither `session.env` nor `session.pass_env` may name one. Sessions inherit
 nothing else either (§4.2), so a variable reaches a session only if this
 file lists it.
 
-Values in `env` and `pass_env` appear in the session's command line, which
-other processes of the same user can read, as they can its environment. Do
-not put secrets there.
+Values in `env` and `pass_env`, and the `{settings}` permission lists,
+appear in the session's command line. On Linux every process in the
+container can read every other's command line (`/proc/<pid>/cmdline`), so
+every heteronym of the class can read them. Never put secrets there; a
+heteronym's own secrets belong in its own home (§6).
 
 Verified by: `tests/test_runtime.py::ApiKeyGuard`,
 `tests/test_runtime.py::RuntimeConfig::test_api_key_in_session_env`.
@@ -301,3 +313,160 @@ exception in one pass is logged and the loop goes on.
 - Log lines go to stdout, one per action, with a timestamp.
 
 Verified by: `tests/test_supervise.py`.
+
+## 6. Isolation by operating-system user
+
+Each heteronym runs as its own Unix user, so no session can read another's
+folders, home or memory, whatever its permission rules say. This is the
+default (`isolation: users`).
+
+### 6.1 Users
+
+- Heteronym `<name>` runs as user and group `h-<name>`.
+- Its uid comes from `users.json` in the state directory (written under a
+  file lock), handed out from `uid_base` and never reused for another name.
+  A recreated container, whose `/etc/passwd` starts empty, recreates each
+  user with its old uid, so its folders stay its own.
+- If the map is lost, a heteronym whose home still exists gets back the uid
+  that owns it, and a new heteronym never receives a uid that owns anything
+  under the folder roots: files are never handed to a stranger. Before a
+  new uid is assigned, the supervisor walks the homes root, the work root
+  and any other folder root (the memory live root, §7), entering only
+  root-owned directories, so a folder below a parent root made (§6.2) is
+  seen too. A walk that cannot finish (an unreadable directory, more than
+  100 000 entries) refuses the assignment instead of guessing.
+- The user is created the first time the heteronym starts. Only heteronyms
+  of the container's own class (§1.5) ever get a user.
+
+### 6.2 Folders
+
+The heteronym's home (`<homes>/<name>`) and every folder in its definition
+are owned by its user, mode 700.
+
+- The supervisor walks each path from `/` by file descriptor, opening every
+  component with `O_NOFOLLOW`, and creates, chmods and chowns only through
+  descriptors. A heteronym that swaps a directory for a symlink in its own
+  folder therefore cannot redirect anything root does.
+- Root acts only on root-owned components. A parent it creates on the way
+  down stays root's, mode 755; only the final folder is handed over, so two
+  heteronyms' folders can share a parent that neither owns. From the first
+  component the heteronym owns, the rest of the path is created and fixed
+  as the heteronym (`setpriv`), which can do nothing it could not do itself.
+- A component owned by anyone else, a symlink, or a file is refused, and
+  that heteronym's session is not started.
+
+### 6.3 Sessions and sign-in
+
+- Each heteronym has its own tmux server, run as its user with no
+  capabilities (`setpriv --reuid --regid --clear-groups`), with its socket
+  under its own home (`TMUX_TMPDIR`) rather than `/tmp/tmux-<uid>`, which
+  another heteronym could create first. Its session's `HOME`, `USER` and
+  `LOGNAME` are its own (§4.2).
+- From each heteronym's server only that heteronym's own session is read;
+  any other session it makes there is ignored. A server that cannot be
+  listed is logged and skipped, so one heteronym can never stop the
+  reconcile of its class.
+- Every tmux call has a 10-second limit, and every other command run as a
+  heteronym (folder preparation, §6.2) a 30-second one. A heteronym owns
+  its server and every process of its uid: it can stop them, or put a
+  listener that never answers on its socket. A listing or start that runs
+  out of time is logged, and every process of that heteronym's uid is
+  ended, as on a stop; if it is still enabled, a later pass starts it
+  afresh, under the crash back-off (§5) when it is killed soon after
+  starting. The limits are a trade-off: on a host so loaded that an honest
+  tmux call takes longer, that heteronym's session is ended too.
+- Root holds no `CAP_KILL`, and a `kill` run as the heteronym could be
+  stopped by it before it signals. So signals come from a forked child
+  that takes the heteronym's uid as its effective uid only, keeping real
+  and saved uid 0: the kernel lets it signal the heteronym's processes,
+  and the heteronym can neither signal nor trace it. Real uid 0 would also
+  let it signal any root process, so each target is pinned with a pidfd
+  and signalled only if its real uid is the heteronym's; a pid reused
+  between listing and signalling is never hit. Where pidfds are not
+  available (a kernel before 5.3, a seccomp profile without
+  `pidfd_open`), the uid is checked and the pid signalled directly.
+- A process counts as live unless it is a zombie with no threads left: a
+  process whose main thread has exited shows as a zombie while its other
+  threads run on, and it is stopped like any other.
+- A heteronym whose uid has processes but no recognisable session (it
+  renamed or re-tagged its session, or left a daemon) is listed as running
+  with no hash, so it is stopped or restarted like any other.
+- Stopping a heteronym ends its tmux session and then every process its uid
+  runs (SIGKILL to each of its pids, as above, repeated until none is
+  left); a stop that leaves a process behind after 5 seconds is reported as
+  failed.
+- Each heteronym signs in once, on its own: `relayer login <name>` runs the
+  heteronym's exact session command (§3.1) interactively, as its user, in
+  its workspace, with the session's environment, so every first-run prompt
+  is answered in the configuration the supervisor will use. Its credentials
+  then live in its own home. `login` refuses while that heteronym's session
+  is running; set `enabled: false` first.
+
+### 6.4 Capabilities
+
+The supervisor runs as root inside its container with exactly `CAP_CHOWN`,
+`CAP_SETUID` and `CAP_SETGID`; the container drops every other capability
+and keeps `no-new-privileges` (setpriv is not a setuid program, so that
+flag does not stop it).
+
+Two shapes were possible: (a) an entrypoint that creates every user as
+root and then drops all capabilities before starting the supervisor, or
+(b) a supervisor that keeps these three. This is (b). Under (a) a heteronym
+created at run time, from chat, needs the container restarted to get its
+user, and a restart ends every session in the class, losing each one's
+context, every time one is created. Under (b) the supervisor holds no
+`DAC_OVERRIDE` or `DAC_READ_SEARCH`, so even it cannot read inside a
+heteronym's folders; what it must do there, it does as that heteronym.
+
+### 6.5 Without isolation
+
+`isolation: none` runs every session as the supervisor's own user, with no
+users, no ownership changes and no isolation between heteronyms. It is for
+running outside a container: tests and single-user development.
+
+### 6.6 Remote Control
+
+The owner reaches a heteronym's session from the Claude app through Claude
+Code's Remote Control. With Claude Code, the session command carries
+`--remote-control` (`examples/relayer.yaml`). Remote Control needs:
+
+- the heteronym's own full claude.ai sign-in (`relayer login`); API keys
+  and `claude setup-token` tokens are refused by Claude Code;
+- the first-run answers: trusting the workspace, and enabling Remote
+  Control. Both need a terminal, so they are given once during
+  `relayer login`, which runs the same command;
+- outbound HTTPS to `api.anthropic.com`, `claude.ai` and `claude.com`
+  (Claude Code's network requirements), and neither
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` nor a non-default
+  `ANTHROPIC_BASE_URL` in the session's environment.
+
+Nothing about the per-user isolation (§6.1–§6.4) stands in its way: the
+session's process is an ordinary user process with no capabilities that
+makes outbound connections only.
+
+**What CI checks:** that the pinned Claude Code, run as an unprivileged
+user, offers `--remote-control` (`scripts/image-smoke.sh`). **What it
+cannot:** that a session connects, which needs a real sign-in on a real
+plan. The manual check, for one heteronym `<name>` of class `<class>`:
+
+1. In `heteronyms.yaml`, give `<name>` `enabled: false`, and let the
+   supervisor reconcile (its session, if any, stops).
+2. `docker compose exec <class> relayer login <name>`. Sign in with
+   `/login`, trust the workspace, accept the Remote Control prompt, and
+   check that `/status` shows the plan (not an API key) and that the
+   `/rc active` indicator shows. Exit.
+3. Set `enabled: true`. The supervisor starts the session as `h-<name>`
+   under the container's three capabilities:
+   `docker compose exec <class> ps -o user=,args= -C claude` shows
+   `h-<name>` and `--remote-control`.
+4. In the Claude app, the session appears in the Remote Control list.
+   Send it a message; it answers from its workspace.
+5. If it does not appear, run Claude Code's own eligibility checks as the
+   heteronym:
+   `docker compose exec --user h-<name> <class> env HOME=/homes/<name> CLAUDE_CONFIG_DIR=/homes/<name>/.claude claude doctor`.
+
+Verified by: `tests/test_users.py` (`RealUsers` creates real users and runs
+one case with only the three capabilities; CI runs it as root), and
+`scripts/image-smoke.sh` (the image under compose's exact capabilities: the
+session's process is `h-<name>` with no capabilities, its folders are 700,
+and root in the container cannot read them).

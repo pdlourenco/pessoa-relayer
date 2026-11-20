@@ -116,6 +116,7 @@ class Supervisor:
             running = self.backend.list()
         except SessionError as exc:
             return log + [f"sessions: {exc}"]
+        log += getattr(self.backend, "errors", [])
 
         # Crash accounting: a session we started that is already gone.
         for name, crash in self.crashes.items():

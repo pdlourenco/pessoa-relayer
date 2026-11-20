@@ -64,8 +64,16 @@ def apply(actions: list[Action], desired: dict[str, Heteronym], backend: Backend
             if action.kind in ("start", "restart"):
                 heteronym = desired[action.name]
                 workdir = heteronym.folders[0]
-                os.makedirs(workdir, exist_ok=True)
-                backend.start(action.name, runtime.session_command(heteronym, environ),
+                identity = None
+                if hasattr(backend, "prepare"):
+                    # Per-user isolation: the backend creates the user and
+                    # hands it its home and folders (SPEC §6).
+                    backend.prepare(heteronym)
+                    identity = backend.identity(action.name)
+                else:
+                    os.makedirs(workdir, exist_ok=True)
+                backend.start(action.name,
+                              runtime.session_command(heteronym, environ, identity),
                               workdir, runtime.session_hash(heteronym))
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             errors.append(f"{action}: failed: {exc}")

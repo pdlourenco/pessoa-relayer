@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from relayer.sessions import SessionError, TmuxBackend
+from relayer.sessions import SessionError, SessionTimeout, TmuxBackend
 
 
 def wait_for(path: Path, timeout=5.0) -> str:
@@ -127,7 +127,7 @@ class Retry(unittest.TestCase):
         from unittest import mock
         exiting = subprocess.CompletedProcess([], 1, "", "server exited unexpectedly\n")
         ok = subprocess.CompletedProcess([], 0, "", "")
-        with mock.patch("relayer.sessions.subprocess.run", side_effect=[exiting, ok]) as run, \
+        with mock.patch.object(TmuxBackend, "_call", side_effect=[exiting, ok]) as run, \
                 mock.patch("relayer.sessions.time.sleep"):
             TmuxBackend("s").stop("pa")
         self.assertEqual(run.call_count, 2)
@@ -135,10 +135,54 @@ class Retry(unittest.TestCase):
     def test_other_errors_are_not_retried(self):
         from unittest import mock
         bad = subprocess.CompletedProcess([], 1, "", "can't find session: pa\n")
-        with mock.patch("relayer.sessions.subprocess.run", return_value=bad) as run:
+        with mock.patch.object(TmuxBackend, "_call", return_value=bad) as run:
             with self.assertRaises(SessionError):
                 TmuxBackend("s").stop("pa")
         self.assertEqual(run.call_count, 1)
+
+
+
+class Timeout(unittest.TestCase):
+    """A tmux that never answers (a stopped server, a silent listener on the
+    socket) must not hold the caller: probe review of #6."""
+
+    def test_a_tmux_call_that_never_returns_times_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "tmux"
+            fake.write_text("#!/bin/sh\nexec sleep 30\n")
+            fake.chmod(0o755)
+            backend = TmuxBackend("s", tmux=str(fake), timeout=0.5)
+            started = time.monotonic()
+            with self.assertRaises(SessionTimeout):
+                backend.list()
+            self.assertLess(time.monotonic() - started, 5)
+
+
+
+class KillChild(unittest.TestCase):
+    """A child we started is root's until setpriv switches uid, then the
+    heteronym's: kill_child must reach it either way."""
+
+    def test_tries_both_ways(self):
+        from relayer.users import kill_child
+        for kill_error in (None, PermissionError(1, "EPERM")):
+            with self.subTest(kill_error=kill_error):
+                proc = mock.Mock(pid=4242, returncode=None)
+                proc.kill.side_effect = kill_error
+                as_user = mock.Mock()
+                kill_child(proc, as_user)
+                proc.kill.assert_called_once()
+                as_user.assert_called_once_with([4242])
+
+    def test_a_reaped_child_is_not_signalled_by_pid(self):
+        """Once proc.kill() has reaped it, the pid may belong to anyone."""
+        from relayer.users import kill_child
+        proc = subprocess.Popen(["true"])
+        time.sleep(0.2)                       # exited, not yet reaped
+        as_user = mock.Mock()
+        kill_child(proc, as_user)
+        self.assertEqual(proc.returncode, 0)  # reaped by proc.kill()'s poll
+        as_user.assert_not_called()
 
 
 if __name__ == "__main__":
