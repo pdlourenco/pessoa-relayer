@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pessoa-relayer"
-version = "0.0.1"
+version = "0.1.0"
 description = "Run long-lived agent heteronyms from config and relay chat channels to them"
 readme = "README.md"
 license = { text = "MIT" }
