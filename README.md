@@ -116,6 +116,11 @@ Updating Claude Code means a new release: bump `.claude-code-version` in a
 PR (CI tests that exact version), tag, and move the deployment's pinned tag.
 The image turns off the updater so the version moves only then.
 
+Each version tag gets a GitHub Release, created only after its image is
+published, naming the image, its digest and the pinned Claude Code version,
+with the merged PRs since the previous tag. For a tag whose image is published
+but whose release is missing, run the Release workflow by hand with that tag.
+
 Optional tools are build arguments, all off by default: `INSTALL_GH=1`,
 `TEA_VERSION`, `GLAB_VERSION`, `BUN_VERSION`, and `EXTRA_APT_PACKAGES` for
 language toolchains. Build your own image with the ones a class needs.
