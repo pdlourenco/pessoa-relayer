@@ -95,8 +95,12 @@ jobs:
             "" \
             "Pull by digest: \`docker pull $REF\`")
           # A release filled in by hand for an older tag must not become
-          # "Latest" over a newer one.
+          # "Latest" over a newer one; but when no release exists yet (the
+          # first backfill), it is the latest, or releases/latest has none.
           latest=true
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then latest=false; fi
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] &&
+             [ -n "$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[].tagName')" ]; then
+            latest=false
+          fi
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "$TAG" --notes "$notes" --generate-notes --latest="$latest"
