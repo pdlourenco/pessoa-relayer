@@ -1,23 +1,39 @@
 name: Release
 
 # On a version tag: check it matches pyproject.toml, build the image with the
-# pinned Claude Code version, run the smoke checks, and publish it to ghcr.
+# pinned Claude Code version, run the smoke checks, publish it to ghcr, and
+# then create a GitHub Release for the tag that names the image, its digest
+# and the pinned Claude Code version. The release is created only after the
+# image is pushed, so a release never names an image that does not exist.
 # Deployments pin the exact tag in their own compose file, kept outside this
 # repository.
+#
+# Run by hand (workflow_dispatch) with an existing tag to create a missing
+# release for an image already published: it publishes nothing, and fails if
+# the image or the release's tag is missing, or the release already exists.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag whose image is already published (e.g. v0.1.0)"
+        required: true
 
 permissions:
   contents: read
-  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   publish:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    env:
-      IMAGE: ghcr.io/${{ github.repository }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v5
       - name: tag matches the package version
@@ -32,3 +48,61 @@ jobs:
           echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
           docker tag pessoa-relayer:smoke "$IMAGE:$GITHUB_REF_NAME"
           docker push "$IMAGE:$GITHUB_REF_NAME"
+
+  release:
+    needs: publish
+    # After a successful publish on a tag push; or by hand for an existing tag.
+    if: >-
+      !cancelled() &&
+      ((github.event_name == 'push' && needs.publish.result == 'success') ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release; this job only
+      packages: read    # read the published image's digest
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: tag matches the package version
+        run: scripts/check-release-tag.sh "$TAG"
+      - name: published image and its digest
+        id: image
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker pull "$IMAGE:$TAG"
+          ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$TAG")
+          case "$ref" in
+            "$IMAGE@sha256:"*) ;;
+            *) echo "unexpected digest reference: $ref" >&2; exit 1 ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ steps.image.outputs.ref }}
+        run: |
+          claude=$(cat .claude-code-version)
+          notes=$(printf '%s\n' \
+            "Image: \`$IMAGE:$TAG\`" \
+            "Digest: \`$REF\`" \
+            "Pinned Claude Code: \`$claude\`" \
+            "" \
+            "Pull by digest: \`docker pull $REF\`")
+          # A release filled in by hand for an older tag must not become
+          # "Latest" over a newer one; but when no release exists yet (the
+          # first backfill), it is the latest, or releases/latest has none.
+          # If listing fails, stop rather than read the empty output as "no
+          # releases yet" and mark an older tag Latest.
+          latest=true
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            existing=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[].tagName') || exit 1
+            if [ -n "$existing" ]; then latest=false; fi
+          fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$TAG" --notes "$notes" --generate-notes --latest="$latest"
